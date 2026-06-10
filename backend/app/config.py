@@ -1,0 +1,109 @@
+"""Application configuration.
+
+Single source of truth for all settings. EVERYTHING comes from the
+environment (loaded from the project-root ``.env``) — nothing is hardcoded.
+Import ``settings`` anywhere; never read ``os.environ`` directly elsewhere.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Project root is two levels up from this file: backend/app/config.py -> centralagent/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def _to_asyncpg_url(raw: str) -> str:
+    """Convert a libpq/Neon URL to a SQLAlchemy+asyncpg URL.
+
+    asyncpg does not understand libpq query params like ``sslmode`` or
+    ``channel_binding`` — they must be stripped (SSL is configured via
+    ``connect_args`` on the engine instead). The scheme is normalised to
+    ``postgresql+asyncpg``.
+    """
+    if not raw:
+        return raw
+    parts = urlsplit(raw)
+    scheme = "postgresql+asyncpg"
+    # Drop the query string entirely (sslmode / channel_binding live there).
+    return urlunsplit((scheme, parts.netloc, parts.path, "", ""))
+
+
+class Settings(BaseSettings):
+    """All runtime configuration, validated at import time."""
+
+    model_config = SettingsConfigDict(
+        env_file=str(ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- App ---
+    app_env: str = "development"
+    log_level: str = "INFO"
+    log_json: bool = False
+
+    # --- Cadence (seconds) ---
+    calendar_poll_interval_seconds: int = 60
+    scheduler_interval_seconds: int = 30
+    dispatch_lead_seconds: int = 60
+    bot_status_poll_interval_seconds: int = 10
+
+    # --- Database (Neon) ---
+    # Pooled URL for the app runtime; direct (non-pooler) URL for migrations.
+    database_url: str = Field(..., alias="DATABASE_URL")
+    database_url_direct: str = Field(default="", alias="DATABASE_URL_DIRECT")
+
+    # --- Vexa (cloud meeting bot API) ---
+    vexa_api_base: str = Field(default="https://api.cloud.vexa.ai", alias="VEXA_API_BASE")
+    vexa_api_key: str = Field(default="", alias="VEXA_API_KEY")
+    vexa_transcription_token: str = Field(default="", alias="VEXA_TRANSCRIPTION_TOKEN")
+
+    # --- Gemini ---
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_api_base: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta",
+        alias="GEMINI_API_BASE",
+    )
+
+    # --- Google (Calendar read + Gmail send) ---
+    gcp_project_id: str = Field(default="", alias="GCP_PROJECT_ID")
+    bot_google_email: str = Field(default="", alias="BOT_GOOGLE_EMAIL")
+    google_oauth_client_id: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_ID")
+    google_oauth_client_secret: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_SECRET")
+    google_oauth_refresh_token: str = Field(default="", alias="GOOGLE_OAUTH_REFRESH_TOKEN")
+
+    # --- Webhooks / public URL ---
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+
+    # ----- Derived URLs (asyncpg) -----
+    @property
+    def async_database_url(self) -> str:
+        """Pooled connection for the running app (asyncpg)."""
+        return _to_asyncpg_url(self.database_url)
+
+    @property
+    def async_database_url_direct(self) -> str:
+        """Direct (non-pooler) connection for Alembic migrations (asyncpg)."""
+        target = self.database_url_direct or self.database_url
+        return _to_asyncpg_url(target)
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() in {"production", "prod"}
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Cached singleton accessor."""
+    return Settings()
+
+
+settings = get_settings()
