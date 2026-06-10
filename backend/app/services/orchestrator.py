@@ -23,13 +23,19 @@ from app.services.vexa.provider import BotProvider
 log = get_logger(__name__)
 
 # Map Vexa's raw status strings onto our domain state machine.
+#
+# IMPORTANT: every Vexa "the meeting ended" status maps to PROCESSING, NEVER to
+# our COMPLETED. Vexa "completed" means "recording finished" (ready for us to
+# process) — it is NOT the same as our COMPLETED, which means "insights emailed."
+# Our COMPLETED is owned solely by send_report_email. Mapping Vexa "completed"
+# straight to COMPLETED would skip transcript -> Gemini -> email entirely.
 _VEXA_TO_STATUS = {
     "requested": MeetingStatus.JOINING,
     "joining": MeetingStatus.JOINING,
     "awaiting_admission": MeetingStatus.JOINING,
     "active": MeetingStatus.ACTIVE,
     "processing": MeetingStatus.PROCESSING,
-    "completed": MeetingStatus.COMPLETED,
+    "completed": MeetingStatus.PROCESSING,  # recording done -> run OUR pipeline
     "stopped": MeetingStatus.PROCESSING,
     "failed": MeetingStatus.FAILED_JOIN,
 }
