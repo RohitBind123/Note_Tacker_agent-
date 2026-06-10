@@ -25,6 +25,7 @@ transcribed, and the Gemini insights were emailed — the only manual step being
 ## Documentation
 | Doc | What it covers |
 |---|---|
+| [docs/HOW_IT_WORKS_WALKTHROUGH.md](docs/HOW_IT_WORKS_WALKTHROUGH.md) | **Start here** — plain-English, no-jargon end-to-end story of one real meeting, explaining every component as it's used |
 | [docs/SETUP.md](docs/SETUP.md) | Credentials & onboarding — Google OAuth, Vexa, Gemini, Neon; how to obtain every secret |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full system design — diagrams, pull-vs-push detection, scheduler timing, state machine, end-to-end trace, components, config knobs, decisions, gotchas |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | All endpoints — health, meetings, admin, webhooks (with curl examples + schemas) |
