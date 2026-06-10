@@ -50,6 +50,12 @@ class StopResult(BaseModel):
     stopped: bool
 
 
+class EmailResult(BaseModel):
+    meeting_id: int
+    message_id: str
+    status: MeetingStatus
+
+
 class ReportOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

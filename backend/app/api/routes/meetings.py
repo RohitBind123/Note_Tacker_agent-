@@ -14,6 +14,7 @@ from app.db.session import get_db
 from app.logging_config import get_logger
 from app.schemas.meetings import (
     DispatchRequest,
+    EmailResult,
     MeetingOut,
     ReportOut,
     StopResult,
@@ -112,6 +113,13 @@ async def get_report(meeting_id: int, db: AsyncSession = Depends(get_db)) -> Mee
     if report is None:
         raise HTTPException(status_code=404, detail="report not generated yet")
     return report
+
+
+@router.post("/{meeting_id}/send-email", response_model=EmailResult)
+async def send_email(meeting_id: int, db: AsyncSession = Depends(get_db)) -> EmailResult:
+    meeting = await _get_meeting_or_404(db, meeting_id)
+    message_id = await orchestrator.send_report_email(db, meeting)
+    return EmailResult(meeting_id=meeting_id, message_id=message_id, status=meeting.status)
 
 
 @router.post("/{meeting_id}/stop", response_model=StopResult)

@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db.models import Meeting, MeetingReport, MeetingStatus, Transcript
 from app.logging_config import get_logger
+from app.services import email_template
 from app.services.gemini.analyzer import GeminiAnalyzer
+from app.services.gmail.sender import send_html_email
 from app.services.meet_url import build_meet_url, parse_native_meeting_id
 from app.services.vexa.factory import get_provider
 from app.services.vexa.provider import BotProvider
@@ -212,3 +214,36 @@ async def run_analysis(
     await db.refresh(report)
     log.info("analysis_stored", meeting_id=meeting.id, model=report.model_used)
     return report
+
+
+async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
+    """Email the insights report to the organizer; marks meeting COMPLETED."""
+    report = (
+        await db.execute(select(MeetingReport).where(MeetingReport.meeting_id == meeting.id))
+    ).scalar_one_or_none()
+    if report is None:
+        raise RuntimeError(f"no report to email for meeting {meeting.id}")
+
+    to = meeting.organizer_email
+    if not to:
+        meeting.status = MeetingStatus.EMAIL_FAILED
+        meeting.failure_reason = "no organizer email on meeting"
+        await db.commit()
+        raise RuntimeError(f"meeting {meeting.id} has no organizer email")
+
+    subject = email_template.build_subject(meeting)
+    html = email_template.build_html(meeting, report)
+    try:
+        message_id = await send_html_email(to=to, subject=subject, html=html)
+    except Exception as exc:
+        meeting.status = MeetingStatus.EMAIL_FAILED
+        meeting.failure_reason = f"email failed: {exc}"
+        await db.commit()
+        log.error("report_email_failed", meeting_id=meeting.id, error=str(exc))
+        raise
+
+    report.email_sent_at = _now()
+    meeting.status = MeetingStatus.COMPLETED
+    await db.commit()
+    log.info("report_emailed", meeting_id=meeting.id, to=to, message_id=message_id)
+    return message_id

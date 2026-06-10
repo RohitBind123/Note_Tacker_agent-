@@ -43,8 +43,14 @@
 - [x] endpoints: POST /meetings/{id}/analyze, GET /meetings/{id}/report; 2 unit tests (respx)
 - [x] REAL e2e: analyzed meeting 1's actual transcript → structured summary + action_items(owner), empty decisions/risks (no hallucination). Stored in Neon.
 
-## P5 — Gmail delivery
-- [ ] HTML insights email → organizer (send as centralagentai)
+## P5 — Gmail delivery  (DONE — real email sent, pushed)
+- [x] GmailSender: users.messages.send (base64url MIME) as centralagentai (gmail.send scope)
+- [x] email_template: HTML insights email; empty sections -> "None noted" (no fake data), HTML-escaped
+- [x] orchestrator.send_report_email -> COMPLETED / EMAIL_FAILED; wired into scheduler advance (analyze -> email -> COMPLETED)
+- [x] endpoint POST /meetings/{id}/send-email; 3 email-template unit tests (24 total pass)
+- [x] REAL e2e: sent insights email for meeting 1 to organizer (message_id 19eb35470014281b), meeting -> COMPLETED
+
+## FULL PIPELINE COMPLETE (P1-P5): invite bot -> detect -> dispatch -> join -> transcribe -> Gemini -> email -> COMPLETED
 
 ## P6 — Hardening
 - [ ] Idempotency, retries, timeouts, tests, decision-log docs

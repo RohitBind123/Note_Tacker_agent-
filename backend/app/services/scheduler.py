@@ -103,11 +103,16 @@ async def advance_active() -> None:
                     try:
                         await orchestrator.run_analysis(db, meeting)
                         log.info("scheduler_meeting_analyzed", meeting_id=meeting_id)
-                        # P5: email the report here, then mark COMPLETED.
                     except Exception:
                         meeting.status = MeetingStatus.FAILED_ANALYSIS
                         await db.commit()
                         log.exception("scheduler_analysis_error", meeting_id=meeting_id)
+                        continue
+                    try:
+                        await orchestrator.send_report_email(db, meeting)
+                        log.info("scheduler_meeting_completed", meeting_id=meeting_id)
+                    except Exception:
+                        log.exception("scheduler_email_error", meeting_id=meeting_id)
             except Exception:
                 log.exception("scheduler_advance_error", meeting_id=meeting_id)
 
