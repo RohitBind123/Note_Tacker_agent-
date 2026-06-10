@@ -61,7 +61,8 @@
 - [x] Dockerfile + .dockerignore + railway.json (migrations on start, /health check)
 - [x] docs/ARCHITECTURE.md (decision log) + docs/DEPLOY.md
 - [x] Railway deploy LIVE: https://centralagent-production-457c.up.railway.app — project/service "centralagent", 24 env vars pushed (APP_ENV=production, LOG_JSON=true), migrations run on start. Verified: /health 200, /healthz/db 200, poller(60s)+scheduler(30s) loops running, poller_upserted in prod.
-- [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch
+- [x] FIX (deployed): reliable meeting-end. /stop -> PROCESSING instantly (no waiting on Vexa's stale 'active'); scheduler auto-stops bot past end_time+grace (no lingering); new process_pending pass finalizes any PROCESSING meeting (transcript->Gemini->email) idempotently. Pure end_reason helper + 5 unit tests (32 total). Caveat: Vexa cloud participants_count unreliable (0 with human present) -> auto-stop keys off end_time, not participants.
+- [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch; verify /stop->auto-email path on next real meeting
 
 ## Auto-accept (RSVP)  (DONE — verified)
 - [x] Widened OAuth scope to calendar.events (read-write); re-consented; new refresh token
