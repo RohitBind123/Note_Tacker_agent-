@@ -74,6 +74,9 @@
 - [x] README index + ARCHITECTURE, CHALLENGES, DEPLOY (+ops), SETUP, API_REFERENCE, CALENDAR_PUSH, ZERO_CLICK_AUTO_ADMIT; .env.example MEETING_END_GRACE_SECONDS
 - [x] FIX (deployed): Vexa "completed" status now -> PROCESSING (was terminal COMPLETED, which skipped transcript/Gemini/email). COMPLETED owned only by send_report_email. Guard test (35 total). Recovered meeting #244 email.
 
+## Configurable email recipients  (DONE — deployed)
+- [x] EMAIL_RECIPIENTS env config: "organizer" (default) | "all_attendees". meetings.attendees JSONB col (migration a1b2c3d4e5f6, applied to Neon); poller stores attendee list; orchestrator.resolve_recipients (organizer-first, excludes bot, case-insensitive dedupe, fallback to organizer); send_report_email emails all via To header. 5 tests (40 total). Railway var set to organizer (safe default). To enable all: `railway variables --set "EMAIL_RECIPIENTS=all_attendees"`.
+
 ## REMAINING OPEN ACTIONS (not code-blocking — manual setup + future build)
 - [ ] **Bot-account "From everyone"** — Calendar → Settings → Event settings → "Add invitations to my calendar" → "From everyone". Makes invites from ANY sender land on the bot calendar (poller detection). One-time, manual on the bot account. See docs/SETUP.md §2.5.
 - [ ] **Publish OAuth app to Production** — GCP → OAuth consent screen → Publish app (may need Google verification for sensitive scopes). Stops the ~7-day Testing-mode refresh-token expiry. Until then, re-run tools/get_refresh_token.py. See docs/SETUP.md §2.4.
