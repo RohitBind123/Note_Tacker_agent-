@@ -25,9 +25,13 @@ transcribed, and the Gemini insights were emailed — the only manual step being
 ## Documentation
 | Doc | What it covers |
 |---|---|
+| [docs/SETUP.md](docs/SETUP.md) | Credentials & onboarding — Google OAuth, Vexa, Gemini, Neon; how to obtain every secret |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full system design — diagrams, pull-vs-push detection, scheduler timing, state machine, end-to-end trace, components, config knobs, decisions, gotchas |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | All endpoints — health, meetings, admin, webhooks (with curl examples + schemas) |
 | [docs/CHALLENGES.md](docs/CHALLENGES.md) | Every dev/deploy blocker hit, with root cause + fix + code |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | Railway + Neon deploy runbook |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Railway + Neon deploy runbook + day-2 operations (stop/redeploy/restart) |
+| [docs/CALENDAR_PUSH.md](docs/CALENDAR_PUSH.md) | Enabling real-time push (events.watch) once you own a verified domain |
+| [docs/ZERO_CLICK_AUTO_ADMIT.md](docs/ZERO_CLICK_AUTO_ADMIT.md) | Plan + risks for the signed-in self-hosted bot (removes the last manual click) |
 | [tasks/todo.md](tasks/todo.md) | Build plan + per-phase decision log |
 
 ## Stack
