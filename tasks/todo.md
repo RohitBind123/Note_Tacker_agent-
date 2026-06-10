@@ -70,10 +70,15 @@
 - [x] REAL e2e: P3 Auto Test invite needsAction -> accepted automatically on poll
 - Note: auto-RSVP needs the event already on the bot calendar ("from everyone" setting). Fully setting-independent detection = Gmail-based (follow-up).
 
-## Zero-click auto-admit  (NEXT — the hard 10%)
-- [ ] Self-hosted Vexa on amd64 (Railway/VM) with authenticated-meetings (signed-in bot via Google cookies)
-- [ ] SelfHostVexaProvider behind the BotProvider abstraction (config-switched)
-- [ ] Risk: Google bot-detection on automated login; Vexa's own cookie-fallback test failed
+## Docs  (DONE — full set pushed)
+- [x] README index + ARCHITECTURE, CHALLENGES, DEPLOY (+ops), SETUP, API_REFERENCE, CALENDAR_PUSH, ZERO_CLICK_AUTO_ADMIT; .env.example MEETING_END_GRACE_SECONDS
+- [x] FIX (deployed): Vexa "completed" status now -> PROCESSING (was terminal COMPLETED, which skipped transcript/Gemini/email). COMPLETED owned only by send_report_email. Guard test (35 total). Recovered meeting #244 email.
+
+## REMAINING OPEN ACTIONS (not code-blocking — manual setup + future build)
+- [ ] **Bot-account "From everyone"** — Calendar → Settings → Event settings → "Add invitations to my calendar" → "From everyone". Makes invites from ANY sender land on the bot calendar (poller detection). One-time, manual on the bot account. See docs/SETUP.md §2.5.
+- [ ] **Publish OAuth app to Production** — GCP → OAuth consent screen → Publish app (may need Google verification for sensitive scopes). Stops the ~7-day Testing-mode refresh-token expiry. Until then, re-run tools/get_refresh_token.py. See docs/SETUP.md §2.4.
+- [ ] **Zero-click auto-admit (the hard 10%)** — self-hosted Vexa on amd64 with authenticated-meetings (signed-in bot via bot Google session); add SelfHostVexaProvider behind the BotProvider abstraction (config-switched VEXA_PROVIDER). Risk: Google bot-detection on automated login; Vexa's own cookie-fallback test failed. Full plan + risks in docs/ZERO_CLICK_AUTO_ADMIT.md.
+- [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch; paid Vexa key for sustained deploy (free key expires ~1h)
 
 ## Decision log
 - Dev uses Vexa CLOUD provider (self-host image is amd64-only, breaks under qemu on arm64 Mac).
