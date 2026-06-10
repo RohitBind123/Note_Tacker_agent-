@@ -27,9 +27,14 @@
 - [x] Unit tests (19 pass): meet_url, transcript helpers, cloud provider (respx-mocked)
 - [x] REAL e2e: our API dispatched bot 14839 → joining→active → transcript (8 segs, speaker-attributed) persisted to Neon → bot stopped. Confirmed manual admit still required (auto-admit = parallel workstream).
 
-## P3 — Calendar auto-trigger
-- [ ] Calendar poller (read bot's events, detect invited + Meet link), idempotent upsert
-- [ ] Scheduler (claim job, dispatch bot at start time) — the graded "advanced" flow
+## P3 — Calendar auto-trigger  (DONE — real e2e verified, pushed)
+- [x] Async Google token helper (refresh via oauth2 endpoint) + CalendarClient (list bot events w/ Meet links)
+- [x] Calendar poller — idempotent upsert (ON CONFLICT google_event_id, preserves status)
+- [x] Scheduler — claim due meetings (FOR UPDATE SKIP LOCKED, no I/O in lock), dispatch, advance to transcript on end
+- [x] Background runner wired into FastAPI lifespan (poller 60s + scheduler 30s loops)
+- [x] Calendar PUSH (events.watch) receiver + watch mgmt, gated behind CALENDAR_PUSH_ENABLED (prod/verified-domain only); poller = dev primary + prod backstop
+- [x] REAL e2e: invited centralagentai to a Calendar event (no URL) → poller auto-detected as meeting id=2 → scheduler claimed due meeting → dispatched bot 14840 → bot joined (active). Decision: bot calendar must be set "add invitations: from everyone" (read-only scope can't auto-RSVP).
+- Note: Calendar timezone gotcha — user's GCal is UTC; our parsing of dateTime+offset is correct (verified against raw API).
 
 ## P4 — Gemini insights
 - [ ] Analyzer: transcript → structured report (summary/decisions/actions/risks/next steps)

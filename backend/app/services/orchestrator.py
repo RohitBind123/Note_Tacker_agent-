@@ -83,6 +83,38 @@ async def dispatch_by_url(
     return meeting
 
 
+async def dispatch_existing(
+    db: AsyncSession,
+    meeting: Meeting,
+    *,
+    bot_name: str = "CentralAgent Notetaker",
+    provider: BotProvider | None = None,
+) -> Meeting:
+    """Send a bot for a meeting row that already exists (e.g. from the calendar)."""
+    provider = provider or get_provider()
+    log.info(
+        "dispatch_existing_start",
+        meeting_id=meeting.id,
+        native_meeting_id=meeting.native_meeting_id,
+    )
+    try:
+        result = await provider.join(meeting.native_meeting_id, bot_name=bot_name)
+    except Exception as exc:
+        meeting.status = MeetingStatus.FAILED_JOIN
+        meeting.failure_reason = f"join failed: {exc}"
+        await db.commit()
+        log.error("dispatch_existing_failed", meeting_id=meeting.id, error=str(exc))
+        raise
+
+    meeting.vexa_bot_id = result.vexa_bot_id
+    meeting.bot_dispatched_at = _now()
+    meeting.status = _VEXA_TO_STATUS.get(result.status, MeetingStatus.JOINING)
+    await db.commit()
+    await db.refresh(meeting)
+    log.info("dispatch_existing_ok", meeting_id=meeting.id, status=meeting.status.value)
+    return meeting
+
+
 async def refresh_status(
     db: AsyncSession, meeting: Meeting, *, provider: BotProvider | None = None
 ) -> Meeting:

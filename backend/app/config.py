@@ -82,6 +82,10 @@ class Settings(BaseSettings):
 
     # --- Webhooks / public URL ---
     public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+    # Calendar push (events.watch). Requires a VERIFIED-domain HTTPS public_base_url;
+    # stays off in dev (ngrok can't be domain-verified) -> poller is the fallback.
+    calendar_push_enabled: bool = Field(default=False, alias="CALENDAR_PUSH_ENABLED")
+    calendar_webhook_token: str = Field(default="", alias="CALENDAR_WEBHOOK_TOKEN")
 
     # ----- Derived URLs (asyncpg) -----
     @property

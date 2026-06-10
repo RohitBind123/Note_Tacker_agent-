@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import __version__
-from app.api.routes import health, meetings
+from app.api.routes import admin, health, meetings, webhooks
 from app.config import settings
 from app.logging_config import configure_logging, get_logger
+from app.services import runner
 
 configure_logging()
 log = get_logger(__name__)
@@ -28,8 +29,9 @@ async def lifespan(app: FastAPI):
         vexa_base=settings.vexa_api_base,
         bot_email=settings.bot_google_email,
     )
-    # Future phases: start calendar poller + scheduler here.
+    runner.start()
     yield
+    await runner.stop()
     log.info("app_shutdown")
 
 
@@ -41,6 +43,8 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(meetings.router)
+app.include_router(admin.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/")
