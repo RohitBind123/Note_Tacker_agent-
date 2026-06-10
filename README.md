@@ -31,6 +31,7 @@ transcribed, and the Gemini insights were emailed — the only manual step being
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | All endpoints — health, meetings, admin, webhooks (with curl examples + schemas) |
 | [docs/CHALLENGES.md](docs/CHALLENGES.md) | Every dev/deploy blocker hit, with root cause + fix + code |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Railway + Neon deploy runbook + day-2 operations (stop/redeploy/restart) |
+| [docs/DOCKER_EXPLAINED.md](docs/DOCKER_EXPLAINED.md) | Plain-English, end-to-end explanation of how Docker packages & runs the app |
 | [docs/CALENDAR_PUSH.md](docs/CALENDAR_PUSH.md) | Enabling real-time push (events.watch) once you own a verified domain |
 | [docs/ZERO_CLICK_AUTO_ADMIT.md](docs/ZERO_CLICK_AUTO_ADMIT.md) | Plan + risks for the signed-in self-hosted bot (removes the last manual click) |
 | [tasks/todo.md](tasks/todo.md) | Build plan + per-phase decision log |
@@ -101,6 +102,17 @@ cd backend && PYTHONPATH=. ../.venv/bin/python -m pytest -q
 ## Deploy
 Railway (amd64) + Neon. Env vars pushed from `.env` (`APP_ENV=production`,
 `LOG_JSON=true`); migrations run on container start. See [docs/DEPLOY.md](docs/DEPLOY.md).
+
+## Configuration switches
+**Who gets the insight email** — `EMAIL_RECIPIENTS` (default `organizer`):
+```bash
+cd backend
+railway variables --set "EMAIL_RECIPIENTS=all_attendees"   # email organizer + all guests (excludes the bot)
+railway variables --set "EMAIL_RECIPIENTS=organizer"       # back to organizer only
+```
+(Locally, set `EMAIL_RECIPIENTS` in `.env`.) Other knobs (intervals, dispatch
+lead, end grace, calendar push) live in `.env` / Railway variables — see
+[ARCHITECTURE.md §8](docs/ARCHITECTURE.md#8-configuration-knobs-env-via-configpy).
 
 ## One-time bot-account setup
 - Google Calendar → **Event settings → "Add invitations to my calendar" → "From everyone"** (so invites from any sender land on the bot's calendar for the poller to see).
