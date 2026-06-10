@@ -26,6 +26,11 @@ log = get_logger(__name__)
 
 # Don't dispatch a bot for a meeting that started more than this long ago.
 _STALE_AFTER = timedelta(minutes=30)
+# A meeting claimed (JOINING) but never given a bot id -> a crash between claim
+# and dispatch. Reclaim it after this long.
+_CLAIM_TIMEOUT = timedelta(minutes=5)
+# A dispatched bot should never run longer than this; if it does, force-process.
+_ACTIVE_TIMEOUT = timedelta(hours=3)
 
 
 def _now() -> datetime:
@@ -117,7 +122,47 @@ async def advance_active() -> None:
                 log.exception("scheduler_advance_error", meeting_id=meeting_id)
 
 
+async def recover_stale() -> None:
+    """Reclaim meetings stuck by a mid-flight crash so they never hang forever."""
+    now = _now()
+    async with async_session_factory() as db:
+        # Claimed (JOINING) but never dispatched -> back to SCHEDULED to retry.
+        stuck = (
+            await db.execute(
+                select(Meeting).where(
+                    Meeting.status == MeetingStatus.JOINING,
+                    Meeting.vexa_bot_id.is_(None),
+                    Meeting.dispatch_claimed_at.is_not(None),
+                    Meeting.dispatch_claimed_at < now - _CLAIM_TIMEOUT,
+                )
+            )
+        ).scalars().all()
+        for m in stuck:
+            m.status = MeetingStatus.SCHEDULED
+            m.dispatch_claimed_at = None
+            log.warning("recovered_stuck_claim", meeting_id=m.id)
+
+        # Dispatched but running absurdly long -> force into processing.
+        ancient = (
+            await db.execute(
+                select(Meeting).where(
+                    Meeting.status.in_([MeetingStatus.JOINING, MeetingStatus.ACTIVE]),
+                    Meeting.bot_dispatched_at.is_not(None),
+                    Meeting.bot_dispatched_at < now - _ACTIVE_TIMEOUT,
+                )
+            )
+        ).scalars().all()
+        for m in ancient:
+            m.status = MeetingStatus.PROCESSING
+            m.end_time = m.end_time or now
+            log.warning("recovered_ancient_active", meeting_id=m.id)
+
+        if stuck or ancient:
+            await db.commit()
+
+
 async def tick() -> None:
-    """One scheduler iteration (dispatch + advance)."""
+    """One scheduler iteration (recover + dispatch + advance)."""
+    await recover_stale()
     await dispatch_due()
     await advance_active()

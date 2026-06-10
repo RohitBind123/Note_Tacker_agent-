@@ -5,9 +5,11 @@ scheduler) are added in later phases via the lifespan hook.
 """
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import structlog
+from fastapi import FastAPI, Request
 
 from app import __version__
 from app.api.routes import admin, health, meetings, webhooks
@@ -21,6 +23,12 @@ log = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    missing = settings.missing_required()
+    if missing:
+        if settings.is_production:
+            raise RuntimeError(f"missing required config in production: {missing}")
+        log.warning("config_incomplete", missing=missing)
+
     log.info(
         "app_startup",
         env=settings.app_env,
@@ -40,6 +48,19 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Bind a request id to every log line in the request, and echo it back."""
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    structlog.contextvars.bind_contextvars(request_id=request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        structlog.contextvars.clear_contextvars()
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 
 app.include_router(health.router)
 app.include_router(meetings.router)

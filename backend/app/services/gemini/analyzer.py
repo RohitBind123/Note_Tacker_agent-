@@ -19,6 +19,7 @@ import httpx
 
 from app.config import settings
 from app.logging_config import get_logger
+from app.services.http import request_with_retries
 
 log = get_logger(__name__)
 
@@ -102,8 +103,7 @@ class GeminiAnalyzer:
             },
         }
         log.info("gemini_analyze_request", model=self._model, transcript_chars=len(text))
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(url, json=body)
+        resp = await request_with_retries("POST", url, json=body, timeout=_TIMEOUT)
         if resp.status_code != 200:
             log.error("gemini_analyze_failed", status=resp.status_code, body=resp.text[:300])
             raise RuntimeError(f"gemini analyze failed ({resp.status_code}): {resp.text[:200]}")

@@ -52,8 +52,16 @@
 
 ## FULL PIPELINE COMPLETE (P1-P5): invite bot -> detect -> dispatch -> join -> transcribe -> Gemini -> email -> COMPLETED
 
-## P6 — Hardening
-- [ ] Idempotency, retries, timeouts, tests, decision-log docs
+## P6 — Hardening + Deploy  (IN PROGRESS)
+- [x] Shared HTTP helper with timeouts + bounded retries (services/http.py); applied to Vexa/Gemini/Gmail/Google/Calendar calls
+- [x] Stale-session recovery in scheduler (reclaim crashed JOINING; force-process ancient ACTIVE)
+- [x] Config fail-fast (missing_required) — raise in prod, warn in dev
+- [x] Request-id middleware (bound to every log line + X-Request-ID header)
+- [x] Retry helper unit tests (27 total pass)
+- [x] Dockerfile + .dockerignore + railway.json (migrations on start, /health check)
+- [x] docs/ARCHITECTURE.md (decision log) + docs/DEPLOY.md
+- [ ] Railway deploy (needs Railway account + env vars) — guide user
+- [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch
 
 ## Parallel workstream — zero-click auto-admit
 - [ ] Self-hosted signed-in bot on amd64 infra (authenticated-meetings)

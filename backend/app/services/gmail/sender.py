@@ -13,6 +13,7 @@ import httpx
 from app.config import settings
 from app.logging_config import get_logger
 from app.services.google.token import get_access_token
+from app.services.http import request_with_retries
 
 log = get_logger(__name__)
 
@@ -43,10 +44,10 @@ async def send_html_email(*, to: str, subject: str, html: str) -> str:
 
     token = await get_access_token()
     log.info("gmail_send_request", to=to, subject=subject)
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            _SEND_URL, json={"raw": raw}, headers={"Authorization": f"Bearer {token}"}
-        )
+    resp = await request_with_retries(
+        "POST", _SEND_URL, json={"raw": raw},
+        headers={"Authorization": f"Bearer {token}"}, timeout=_TIMEOUT,
+    )
     if resp.status_code != 200:
         log.error("gmail_send_failed", status=resp.status_code, body=resp.text[:300])
         raise GmailSendError(f"gmail send failed ({resp.status_code}): {resp.text[:200]}")

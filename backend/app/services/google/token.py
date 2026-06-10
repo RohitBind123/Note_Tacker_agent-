@@ -14,6 +14,7 @@ import httpx
 
 from app.config import settings
 from app.logging_config import get_logger
+from app.services.http import request_with_retries
 
 log = get_logger(__name__)
 
@@ -55,8 +56,9 @@ async def get_access_token(*, force_refresh: bool = False) -> str:
             "refresh_token": settings.google_oauth_refresh_token,
             "grant_type": "refresh_token",
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            resp = await client.post(_TOKEN_URL, data=data)
+        resp = await request_with_retries(
+            "POST", _TOKEN_URL, data=data, timeout=httpx.Timeout(10.0, connect=5.0)
+        )
         if resp.status_code != 200:
             log.error("google_token_refresh_failed", status=resp.status_code, body=resp.text[:300])
             raise GoogleAuthError(f"token refresh failed ({resp.status_code}): {resp.text[:200]}")

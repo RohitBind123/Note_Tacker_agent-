@@ -103,6 +103,19 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.app_env.lower() in {"production", "prod"}
 
+    def missing_required(self) -> list[str]:
+        """Names of critical settings that are unset (used for fail-fast)."""
+        required = {
+            "DATABASE_URL": self.database_url,
+            "VEXA_API_KEY": self.vexa_api_key,
+            "GEMINI_API_KEY": self.gemini_api_key,
+            "GOOGLE_OAUTH_CLIENT_ID": self.google_oauth_client_id,
+            "GOOGLE_OAUTH_CLIENT_SECRET": self.google_oauth_client_secret,
+            "GOOGLE_OAUTH_REFRESH_TOKEN": self.google_oauth_refresh_token,
+            "BOT_GOOGLE_EMAIL": self.bot_google_email,
+        }
+        return [name for name, value in required.items() if not value]
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

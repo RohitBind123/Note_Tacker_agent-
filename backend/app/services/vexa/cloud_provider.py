@@ -12,6 +12,7 @@ import httpx
 
 from app.config import settings
 from app.logging_config import get_logger
+from app.services.http import request_with_retries
 from app.services.vexa.provider import (
     BotDispatchResult,
     BotProvider,
@@ -43,8 +44,9 @@ class CloudVexaProvider(BotProvider):
         if bot_name:
             payload["bot_name"] = bot_name
         log.info("vexa_join_request", native_meeting_id=native_meeting_id, platform=platform)
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(f"{self._base}/bots", headers=self._headers(), json=payload)
+        resp = await request_with_retries(
+            "POST", f"{self._base}/bots", headers=self._headers(), json=payload, timeout=_TIMEOUT
+        )
         if resp.status_code not in (200, 201):
             log.error("vexa_join_failed", status=resp.status_code, body=resp.text[:300])
             raise ProviderError("vexa join failed", status_code=resp.status_code, body=resp.text)
@@ -60,8 +62,9 @@ class CloudVexaProvider(BotProvider):
     async def get_status(
         self, native_meeting_id: str, *, platform: str = "google_meet"
     ) -> BotStatusResult | None:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.get(f"{self._base}/bots", headers=self._headers())
+        resp = await request_with_retries(
+            "GET", f"{self._base}/bots", headers=self._headers(), timeout=_TIMEOUT
+        )
         if resp.status_code != 200:
             log.error("vexa_status_failed", status=resp.status_code, body=resp.text[:300])
             raise ProviderError("vexa status failed", status_code=resp.status_code, body=resp.text)
@@ -89,8 +92,9 @@ class CloudVexaProvider(BotProvider):
         self, native_meeting_id: str, *, platform: str = "google_meet"
     ) -> TranscriptResult:
         url = f"{self._base}/transcripts/{platform}/{native_meeting_id}"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-            resp = await client.get(url, headers=self._headers())
+        resp = await request_with_retries(
+            "GET", url, headers=self._headers(), timeout=httpx.Timeout(30.0, connect=5.0)
+        )
         if resp.status_code != 200:
             log.error("vexa_transcript_failed", status=resp.status_code, body=resp.text[:300])
             raise ProviderError(
@@ -109,8 +113,7 @@ class CloudVexaProvider(BotProvider):
 
     async def stop(self, native_meeting_id: str, *, platform: str = "google_meet") -> bool:
         url = f"{self._base}/meetings/{platform}/{native_meeting_id}"
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.delete(url, headers=self._headers())
+        resp = await request_with_retries("DELETE", url, headers=self._headers(), timeout=_TIMEOUT)
         ok = resp.status_code in (200, 202, 204, 409)  # 409 = already stopping/stopped
         log.info("vexa_stop", native_meeting_id=native_meeting_id, status=resp.status_code, ok=ok)
         return ok

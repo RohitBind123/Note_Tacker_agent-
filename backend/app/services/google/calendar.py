@@ -13,6 +13,7 @@ import httpx
 
 from app.logging_config import get_logger
 from app.services.google.token import get_access_token
+from app.services.http import request_with_retries
 
 log = get_logger(__name__)
 
@@ -73,8 +74,9 @@ class CalendarClient:
             "showDeleted": "false",
         }
         url = f"{_CAL_BASE}/calendars/{self._calendar_id}/events"
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {token}"})
+        resp = await request_with_retries(
+            "GET", url, params=params, headers={"Authorization": f"Bearer {token}"}, timeout=_TIMEOUT
+        )
         if resp.status_code != 200:
             log.error("calendar_list_failed", status=resp.status_code, body=resp.text[:300])
             resp.raise_for_status()
