@@ -8,6 +8,51 @@ problem, the options, the chosen path, and the honest risks.
 
 ---
 
+## In plain English (no jargon)
+
+Think of the bot like a guest you invited to a meeting. Two things have to
+happen: it has to **say "yes, I'll come"**, and then it has to **actually get
+into the room**.
+
+**1. Saying "yes" (auto-accept) — ✅ already working.**
+When you invite `centralagentai@gmail.com` to a meeting, the bot automatically
+replies **"yes"** to the invite. You don't do anything. This part is done.
+
+**2. Getting into the room (auto-admit) — ⏳ the part we still want to automate.**
+Right now, when the bot shows up at the Google Meet door, Google puts it in a
+**waiting room** and asks a real person inside to click **"Admit."** That one
+click is the *only* manual step left.
+
+**Why does Google stop it?** Because today the bot walks up as an **anonymous
+guest** — it has no name badge, no Google login. Google treats any nameless guest
+like a stranger at the door and makes a human approve it.
+
+**How we'll make it fully automatic.** We'll have the bot **log in as its own
+Google account** (`centralagentai@gmail.com`) — the *same* account that was
+invited. A person who is both **invited** and **logged in** doesn't get stopped at
+the door; Google lets them walk straight in. So: same bot, but wearing its name
+badge instead of arriving anonymous.
+
+**Why it's the hard part.** To log the bot in, it has to run a real Chrome browser
+signed into the bot's Google account, on a stronger type of server (the kind
+Google's tools actually run on). And Google is **suspicious of robots that log in
+by themselves** — it sometimes blocks automated logins. That's the risky, fiddly
+bit, and the reason it's not done yet.
+
+**If it doesn't work, what happens?** Two safety nets:
+- The meeting host can simply **turn off the waiting room** ("Quick access"), and
+  even today's anonymous bot walks in.
+- Or we keep the **single "Admit" click** — everything *else* (detect, accept,
+  join, transcribe, summarize, email) is already 100% automatic, so it's one
+  click per meeting at most.
+
+**One-line summary:** *the bot already auto-says-yes to invites; to also let it
+walk in without a click, we'll have it join while logged in as its own Google
+account instead of as an anonymous guest — the tricky part is doing that login
+automatically without Google blocking it.*
+
+---
+
 ## The problem
 The Vexa **cloud** bot joins as an **anonymous guest** (no Google identity).
 Google Meet sends unknown participants to a **lobby**, so a human in the meeting
