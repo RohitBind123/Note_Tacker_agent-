@@ -52,7 +52,7 @@
 
 ## FULL PIPELINE COMPLETE (P1-P5): invite bot -> detect -> dispatch -> join -> transcribe -> Gemini -> email -> COMPLETED
 
-## P6 — Hardening + Deploy  (IN PROGRESS)
+## P6 — Hardening + Deploy  (DONE — LIVE on Railway)
 - [x] Shared HTTP helper with timeouts + bounded retries (services/http.py); applied to Vexa/Gemini/Gmail/Google/Calendar calls
 - [x] Stale-session recovery in scheduler (reclaim crashed JOINING; force-process ancient ACTIVE)
 - [x] Config fail-fast (missing_required) — raise in prod, warn in dev
@@ -60,7 +60,7 @@
 - [x] Retry helper unit tests (27 total pass)
 - [x] Dockerfile + .dockerignore + railway.json (migrations on start, /health check)
 - [x] docs/ARCHITECTURE.md (decision log) + docs/DEPLOY.md
-- [ ] Railway deploy (needs Railway account + env vars) — guide user
+- [x] Railway deploy LIVE: https://centralagent-production-457c.up.railway.app — project/service "centralagent", 24 env vars pushed (APP_ENV=production, LOG_JSON=true), migrations run on start. Verified: /health 200, /healthz/db 200, poller(60s)+scheduler(30s) loops running, poller_upserted in prod.
 - [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch
 
 ## Auto-accept (RSVP)  (DONE — verified)
