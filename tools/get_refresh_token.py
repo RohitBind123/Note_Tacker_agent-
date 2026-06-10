@@ -17,7 +17,8 @@ import sys
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar.events.readonly",
+    # read-write events so the bot can auto-RSVP "yes" to invitations
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.send",
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",

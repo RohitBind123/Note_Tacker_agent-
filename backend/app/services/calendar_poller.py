@@ -35,6 +35,14 @@ async def poll_once(
         time_min=now - look_back, time_max=now + look_ahead
     )
 
+    # Auto-RSVP "yes" to invitations the bot hasn't responded to yet.
+    for ev in events:
+        if ev.self_response_status == "needsAction" and ev.raw.get("attendees"):
+            try:
+                await client.accept_invite(ev.event_id, ev.raw["attendees"])
+            except Exception:
+                log.warning("poller_rsvp_error", event_id=ev.event_id)
+
     rows: list[dict] = []
     for ev in events:
         try:

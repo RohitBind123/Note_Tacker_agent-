@@ -63,8 +63,16 @@
 - [ ] Railway deploy (needs Railway account + env vars) — guide user
 - [ ] (follow-up) DB-integration tests for poller/scheduler; idempotency-key on manual dispatch
 
-## Parallel workstream — zero-click auto-admit
-- [ ] Self-hosted signed-in bot on amd64 infra (authenticated-meetings)
+## Auto-accept (RSVP)  (DONE — verified)
+- [x] Widened OAuth scope to calendar.events (read-write); re-consented; new refresh token
+- [x] CalendarClient.accept_invite (PATCH self attendee -> accepted); poller auto-RSVPs needsAction invites
+- [x] REAL e2e: P3 Auto Test invite needsAction -> accepted automatically on poll
+- Note: auto-RSVP needs the event already on the bot calendar ("from everyone" setting). Fully setting-independent detection = Gmail-based (follow-up).
+
+## Zero-click auto-admit  (NEXT — the hard 10%)
+- [ ] Self-hosted Vexa on amd64 (Railway/VM) with authenticated-meetings (signed-in bot via Google cookies)
+- [ ] SelfHostVexaProvider behind the BotProvider abstraction (config-switched)
+- [ ] Risk: Google bot-detection on automated login; Vexa's own cookie-fallback test failed
 
 ## Decision log
 - Dev uses Vexa CLOUD provider (self-host image is amd64-only, breaks under qemu on arm64 Mac).

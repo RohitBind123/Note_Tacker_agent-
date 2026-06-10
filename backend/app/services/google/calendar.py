@@ -30,7 +30,15 @@ class CalendarEvent:
     meet_url: str | None
     organizer_email: str | None
     attendees: list[str] = field(default_factory=list)
+    self_response_status: str | None = None  # needsAction / accepted / declined / tentative
     raw: dict = field(default_factory=dict)
+
+
+def _self_response_status(event: dict) -> str | None:
+    for a in event.get("attendees", []) or []:
+        if a.get("self"):
+            return a.get("responseStatus")
+    return None
 
 
 def _parse_dt(node: dict | None) -> datetime | None:
@@ -98,8 +106,32 @@ class CalendarClient:
                     meet_url=meet_url,
                     organizer_email=(item.get("organizer") or {}).get("email"),
                     attendees=[a.get("email") for a in item.get("attendees", []) if a.get("email")],
+                    self_response_status=_self_response_status(item),
                     raw=item,
                 )
             )
         log.info("calendar_listed", total=len(items), with_meet=len(events))
         return events
+
+    async def accept_invite(self, event_id: str, attendees_raw: list[dict]) -> bool:
+        """RSVP 'accepted' for the bot on an event (requires calendar.events scope)."""
+        updated = [
+            {**a, "responseStatus": "accepted"} if a.get("self") else a for a in attendees_raw
+        ]
+        token = await get_access_token()
+        url = f"{_CAL_BASE}/calendars/{self._calendar_id}/events/{event_id}"
+        resp = await request_with_retries(
+            "PATCH",
+            url,
+            json={"attendees": updated},
+            params={"sendUpdates": "none"},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_TIMEOUT,
+        )
+        ok = resp.status_code == 200
+        if not ok:
+            log.warning("calendar_rsvp_failed", event_id=event_id, status=resp.status_code,
+                        body=resp.text[:200])
+        else:
+            log.info("calendar_rsvp_accepted", event_id=event_id)
+        return ok
