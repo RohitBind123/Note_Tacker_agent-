@@ -8,8 +8,8 @@ client_secret*.json
 token*.json
 service-account*.json
 
-# --- Vendored reference clone (not part of our codebase) ---
-vexa/
+# --- Vendored reference clone (root-level only; NOT our app/services/vexa) ---
+/vexa/
 
 # --- Python ---
 __pycache__/

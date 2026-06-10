@@ -11,18 +11,21 @@
 - [x] Google OAuth for `centralagentai@gmail.com` — calendar.events.readonly + gmail.send VERIFIED
 - [x] Neon Postgres (pooled + direct URLs), ngrok, GCP project — all in gitignored `.env`
 
-## P1 — Skeleton  (IN PROGRESS)
-- [ ] backend/ project structure, requirements
-- [ ] config.py — pydantic-settings, loads root .env, Neon async/alembic URL handling
-- [ ] logging_config.py — structured logging, used everywhere
-- [ ] db: base, models (meetings, transcripts, meeting_reports + status enum), async session
-- [ ] Alembic (async env) + first migration applied to Neon
-- [ ] FastAPI main + /health, /healthz/db
-- [ ] git init + push to RohitBind123/Note_Tacker_agent- (feature branch + PR)
+## P1 — Skeleton  (DONE — verified on real Neon, pushed to main)
+- [x] backend/ project structure, requirements
+- [x] config.py — pydantic-settings, loads root .env, Neon async/alembic URL handling
+- [x] logging_config.py — structured logging, used everywhere
+- [x] db: base, models (meetings, transcripts, meeting_reports + status enum), async session
+- [x] Alembic (async env) + first migration applied to Neon (rev baf0f4995237)
+- [x] FastAPI main + /health, /healthz/db (verified: real Neon reachable)
+- [x] git init + push to RohitBind123/Note_Tacker_agent- (main)
 
-## P2 — Vexa provider + manual orchestration
-- [ ] BotProvider interface + CloudVexaProvider (POST /bots, status, transcript, DELETE)
-- [ ] Manual dispatch endpoint: given Meet URL → join → poll → fetch transcript → store
+## P2 — Vexa provider + manual orchestration  (DONE — real e2e verified, pushed)
+- [x] BotProvider interface + CloudVexaProvider (POST /bots, status, transcript, DELETE)
+- [x] Meet URL parser (native_meeting_id) + orchestrator (dispatch/refresh/transcript)
+- [x] Manual dispatch endpoint: Meet URL → join → poll → fetch transcript → store
+- [x] Unit tests (19 pass): meet_url, transcript helpers, cloud provider (respx-mocked)
+- [x] REAL e2e: our API dispatched bot 14839 → joining→active → transcript (8 segs, speaker-attributed) persisted to Neon → bot stopped. Confirmed manual admit still required (auto-admit = parallel workstream).
 
 ## P3 — Calendar auto-trigger
 - [ ] Calendar poller (read bot's events, detect invited + Meet link), idempotent upsert

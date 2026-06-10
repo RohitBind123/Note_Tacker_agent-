@@ -1,0 +1,147 @@
+"""Meeting orchestration — dispatch a bot, track its status, capture transcript.
+
+P2 covers the manual path (given a Meet URL). The scheduler (P3) reuses these
+same functions once meetings come from the calendar.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import Meeting, MeetingStatus, Transcript
+from app.logging_config import get_logger
+from app.services.meet_url import build_meet_url, parse_native_meeting_id
+from app.services.vexa.factory import get_provider
+from app.services.vexa.provider import BotProvider
+
+log = get_logger(__name__)
+
+# Map Vexa's raw status strings onto our domain state machine.
+_VEXA_TO_STATUS = {
+    "requested": MeetingStatus.JOINING,
+    "joining": MeetingStatus.JOINING,
+    "awaiting_admission": MeetingStatus.JOINING,
+    "active": MeetingStatus.ACTIVE,
+    "processing": MeetingStatus.PROCESSING,
+    "completed": MeetingStatus.COMPLETED,
+    "stopped": MeetingStatus.PROCESSING,
+    "failed": MeetingStatus.FAILED_JOIN,
+}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def dispatch_by_url(
+    db: AsyncSession,
+    meet_url: str,
+    *,
+    title: str | None = None,
+    organizer_email: str | None = None,
+    bot_name: str = "CentralAgent Notetaker",
+    provider: BotProvider | None = None,
+) -> Meeting:
+    """Create a meeting row and send a bot to the given Meet URL."""
+    native_id = parse_native_meeting_id(meet_url)
+    provider = provider or get_provider()
+
+    meeting = Meeting(
+        platform="google_meet",
+        native_meeting_id=native_id,
+        meet_url=build_meet_url(native_id),
+        title=title,
+        organizer_email=organizer_email,
+        status=MeetingStatus.JOINING,
+    )
+    db.add(meeting)
+    await db.flush()  # assign id before the external call
+    log.info("dispatch_created_meeting", meeting_id=meeting.id, native_meeting_id=native_id)
+
+    try:
+        result = await provider.join(native_id, bot_name=bot_name)
+    except Exception as exc:
+        meeting.status = MeetingStatus.FAILED_JOIN
+        meeting.failure_reason = f"join failed: {exc}"
+        await db.commit()
+        log.error("dispatch_join_failed", meeting_id=meeting.id, error=str(exc))
+        raise
+
+    meeting.vexa_bot_id = result.vexa_bot_id
+    meeting.bot_dispatched_at = _now()
+    meeting.status = _VEXA_TO_STATUS.get(result.status, MeetingStatus.JOINING)
+    await db.commit()
+    await db.refresh(meeting)
+    log.info(
+        "dispatch_ok",
+        meeting_id=meeting.id,
+        vexa_bot_id=meeting.vexa_bot_id,
+        status=meeting.status.value,
+    )
+    return meeting
+
+
+async def refresh_status(
+    db: AsyncSession, meeting: Meeting, *, provider: BotProvider | None = None
+) -> Meeting:
+    """Poll the provider once and reconcile our row's status."""
+    provider = provider or get_provider()
+    status = await provider.get_status(meeting.native_meeting_id)
+
+    if status is None:
+        # Bot no longer active. If it was in-flight, the call has ended -> process.
+        if meeting.status in (MeetingStatus.JOINING, MeetingStatus.ACTIVE):
+            meeting.status = MeetingStatus.PROCESSING
+            meeting.end_time = meeting.end_time or _now()
+            log.info("refresh_meeting_ended", meeting_id=meeting.id)
+    else:
+        mapped = _VEXA_TO_STATUS.get(status.status)
+        if mapped and mapped != meeting.status:
+            log.info(
+                "refresh_status_change",
+                meeting_id=meeting.id,
+                from_status=meeting.status.value,
+                to_status=mapped.value,
+            )
+            meeting.status = mapped
+    await db.commit()
+    await db.refresh(meeting)
+    return meeting
+
+
+async def fetch_and_store_transcript(
+    db: AsyncSession, meeting: Meeting, *, provider: BotProvider | None = None
+) -> Transcript:
+    """Fetch the transcript from the provider and persist it (raw preserved)."""
+    provider = provider or get_provider()
+    result = await provider.get_transcript(meeting.native_meeting_id)
+
+    existing = (
+        await db.execute(select(Transcript).where(Transcript.meeting_id == meeting.id))
+    ).scalar_one_or_none()
+    if existing:
+        existing.segments = result.segments
+        existing.full_text = result.full_text
+        existing.fetched_at = _now()
+        transcript = existing
+    else:
+        transcript = Transcript(
+            meeting_id=meeting.id,
+            segments=result.segments,
+            full_text=result.full_text,
+            source="vexa_cloud",
+            fetched_at=_now(),
+        )
+        db.add(transcript)
+
+    await db.commit()
+    await db.refresh(transcript)
+    log.info(
+        "transcript_stored",
+        meeting_id=meeting.id,
+        segments=len(result.segments),
+        chars=len(result.full_text),
+    )
+    return transcript

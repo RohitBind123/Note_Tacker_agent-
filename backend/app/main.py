@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import __version__
-from app.api.routes import health
+from app.api.routes import health, meetings
 from app.config import settings
 from app.logging_config import configure_logging, get_logger
 
@@ -40,6 +40,7 @@ app = FastAPI(
 )
 
 app.include_router(health.router)
+app.include_router(meetings.router)
 
 
 @app.get("/")
