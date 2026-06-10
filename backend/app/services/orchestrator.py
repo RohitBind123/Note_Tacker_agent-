@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Meeting, MeetingStatus, Transcript
+from app.config import settings
+from app.db.models import Meeting, MeetingReport, MeetingStatus, Transcript
 from app.logging_config import get_logger
+from app.services.gemini.analyzer import GeminiAnalyzer
 from app.services.meet_url import build_meet_url, parse_native_meeting_id
 from app.services.vexa.factory import get_provider
 from app.services.vexa.provider import BotProvider
@@ -177,3 +179,36 @@ async def fetch_and_store_transcript(
         chars=len(result.full_text),
     )
     return transcript
+
+
+async def run_analysis(
+    db: AsyncSession, meeting: Meeting, *, analyzer: GeminiAnalyzer | None = None
+) -> MeetingReport:
+    """Analyze the stored transcript with Gemini and persist the report."""
+    analyzer = analyzer or GeminiAnalyzer()
+    transcript = (
+        await db.execute(select(Transcript).where(Transcript.meeting_id == meeting.id))
+    ).scalar_one_or_none()
+    if transcript is None:
+        raise RuntimeError(f"no transcript stored for meeting {meeting.id}")
+
+    data = await analyzer.analyze(transcript.full_text or "")
+
+    report = (
+        await db.execute(select(MeetingReport).where(MeetingReport.meeting_id == meeting.id))
+    ).scalar_one_or_none()
+    if report is None:
+        report = MeetingReport(meeting_id=meeting.id)
+        db.add(report)
+
+    report.summary = data.get("summary")
+    report.decisions = data.get("decisions")
+    report.action_items = data.get("action_items")
+    report.risks = data.get("risks")
+    report.next_steps = data.get("next_steps")
+    report.model_used = settings.gemini_model
+
+    await db.commit()
+    await db.refresh(report)
+    log.info("analysis_stored", meeting_id=meeting.id, model=report.model_used)
+    return report

@@ -48,3 +48,16 @@ class TranscriptOut(BaseModel):
 class StopResult(BaseModel):
     meeting_id: int
     stopped: bool
+
+
+class ReportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    meeting_id: int
+    summary: str | None = None
+    decisions: list | None = None
+    action_items: list | None = None
+    risks: list | None = None
+    next_steps: list | None = None
+    model_used: str | None = None
+    created_at: datetime

@@ -36,8 +36,12 @@
 - [x] REAL e2e: invited centralagentai to a Calendar event (no URL) → poller auto-detected as meeting id=2 → scheduler claimed due meeting → dispatched bot 14840 → bot joined (active). Decision: bot calendar must be set "add invitations: from everyone" (read-only scope can't auto-RSVP).
 - Note: Calendar timezone gotcha — user's GCal is UTC; our parsing of dateTime+offset is correct (verified against raw API).
 
-## P4 — Gemini insights
-- [ ] Analyzer: transcript → structured report (summary/decisions/actions/risks/next steps)
+## P4 — Gemini insights  (DONE — real Gemini verified, pushed)
+- [x] GeminiAnalyzer: httpx → generateContent with responseSchema (structured JSON), model gemini-2.5-flash from config
+- [x] Data-quality guards: short/empty transcript → insufficient report (no model call); prompt forbids inventing owners/dates
+- [x] orchestrator.run_analysis → store MeetingReport; wired into scheduler advance (PROCESSING → analyze, FAILED_ANALYSIS on error)
+- [x] endpoints: POST /meetings/{id}/analyze, GET /meetings/{id}/report; 2 unit tests (respx)
+- [x] REAL e2e: analyzed meeting 1's actual transcript → structured summary + action_items(owner), empty decisions/risks (no hallucination). Stored in Neon.
 
 ## P5 — Gmail delivery
 - [ ] HTML insights email → organizer (send as centralagentai)

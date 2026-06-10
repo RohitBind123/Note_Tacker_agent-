@@ -98,9 +98,16 @@ async def advance_active() -> None:
             try:
                 meeting = await orchestrator.refresh_status(db, meeting, provider=provider)
                 if meeting.status == MeetingStatus.PROCESSING:
-                    # Meeting just ended -> capture the transcript once.
+                    # Meeting just ended -> capture transcript, then analyze.
                     await orchestrator.fetch_and_store_transcript(db, meeting, provider=provider)
-                    log.info("scheduler_meeting_processed", meeting_id=meeting_id)
+                    try:
+                        await orchestrator.run_analysis(db, meeting)
+                        log.info("scheduler_meeting_analyzed", meeting_id=meeting_id)
+                        # P5: email the report here, then mark COMPLETED.
+                    except Exception:
+                        meeting.status = MeetingStatus.FAILED_ANALYSIS
+                        await db.commit()
+                        log.exception("scheduler_analysis_error", meeting_id=meeting_id)
             except Exception:
                 log.exception("scheduler_advance_error", meeting_id=meeting_id)
 

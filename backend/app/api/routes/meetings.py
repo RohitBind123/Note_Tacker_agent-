@@ -9,12 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Meeting, Transcript
+from app.db.models import Meeting, MeetingReport, Transcript
 from app.db.session import get_db
 from app.logging_config import get_logger
 from app.schemas.meetings import (
     DispatchRequest,
     MeetingOut,
+    ReportOut,
     StopResult,
     TranscriptOut,
 )
@@ -96,6 +97,21 @@ async def get_transcript(meeting_id: int, db: AsyncSession = Depends(get_db)) ->
         source=transcript.source,
         fetched_at=transcript.fetched_at,
     )
+
+
+@router.post("/{meeting_id}/analyze", response_model=ReportOut)
+async def analyze_meeting(meeting_id: int, db: AsyncSession = Depends(get_db)) -> MeetingReport:
+    meeting = await _get_meeting_or_404(db, meeting_id)
+    return await orchestrator.run_analysis(db, meeting)
+
+
+@router.get("/{meeting_id}/report", response_model=ReportOut)
+async def get_report(meeting_id: int, db: AsyncSession = Depends(get_db)) -> MeetingReport:
+    row = await db.execute(select(MeetingReport).where(MeetingReport.meeting_id == meeting_id))
+    report = row.scalar_one_or_none()
+    if report is None:
+        raise HTTPException(status_code=404, detail="report not generated yet")
+    return report
 
 
 @router.post("/{meeting_id}/stop", response_model=StopResult)
