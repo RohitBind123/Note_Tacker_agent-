@@ -288,6 +288,7 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 | `scheduler_interval_seconds` | 30 | LOOP 2 cadence |
 | `dispatch_lead_seconds` | 60 | how early the bot joins before start |
 | `meeting_end_grace_seconds` | 120 | wait past `end_time` before auto-stopping a lingering bot |
+| `email_recipients` | organizer | who gets the insight email: `organizer` or `all_attendees` |
 | `calendar_push_enabled` | false | push vs poll (needs a verified domain) |
 | `gemini_model` | gemini-2.5-flash | insight model |
 | Required (`missing_required`) | — | `DATABASE_URL`, `VEXA_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_OAUTH_*`, `BOT_GOOGLE_EMAIL` — app refuses to boot in prod if any is unset |

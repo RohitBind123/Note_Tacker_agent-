@@ -69,6 +69,9 @@ class Meeting(Base, TimestampMixin):
 
     title: Mapped[str | None] = mapped_column(String(512))
     organizer_email: Mapped[str | None] = mapped_column(String(320), index=True)
+    # All invited guest emails (from the calendar event). Used when the insight
+    # email is configured to go to all attendees, not just the organizer.
+    attendees: Mapped[list | None] = mapped_column(JSONB)
 
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -45,6 +45,32 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def resolve_recipients(meeting: Meeting, *, mode: str, bot_email: str) -> list[str]:
+    """Who receives the insight email, per config mode.
+
+    ``mode == "all_attendees"`` -> organizer + every invited guest; any other
+    value -> organizer only. Always excludes the bot's own address and
+    de-duplicates case-insensitively, with the organizer first. Pure/testable.
+    """
+    emails: list[str] = []
+    if meeting.organizer_email:
+        emails.append(meeting.organizer_email)
+    if mode == "all_attendees" and meeting.attendees:
+        emails.extend(meeting.attendees)
+
+    bot = (bot_email or "").strip().lower()
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in emails:
+        cleaned = (e or "").strip()
+        key = cleaned.lower()
+        if not key or key == bot or key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
 async def dispatch_by_url(
     db: AsyncSession,
     meet_url: str,
@@ -230,12 +256,15 @@ async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
     if report is None:
         raise RuntimeError(f"no report to email for meeting {meeting.id}")
 
-    to = meeting.organizer_email
-    if not to:
+    recipients = resolve_recipients(
+        meeting, mode=settings.email_recipients, bot_email=settings.bot_google_email
+    )
+    if not recipients:
         meeting.status = MeetingStatus.EMAIL_FAILED
-        meeting.failure_reason = "no organizer email on meeting"
+        meeting.failure_reason = "no recipients for insight email"
         await db.commit()
-        raise RuntimeError(f"meeting {meeting.id} has no organizer email")
+        raise RuntimeError(f"meeting {meeting.id} has no email recipients")
+    to = ", ".join(recipients)  # Gmail delivers to all addresses in the To header
 
     subject = email_template.build_subject(meeting)
     html = email_template.build_html(meeting, report)

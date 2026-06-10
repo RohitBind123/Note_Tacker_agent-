@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # force-stops a still-active bot (so it never lingers in an empty Meet).
     meeting_end_grace_seconds: int = 120
 
+    # Who receives the insight email: "organizer" (default) or "all_attendees"
+    # (organizer + every invited guest, excluding the bot itself).
+    email_recipients: str = Field(default="organizer", alias="EMAIL_RECIPIENTS")
+
     # --- Database (Neon) ---
     # Pooled URL for the app runtime; direct (non-pooler) URL for migrations.
     database_url: str = Field(..., alias="DATABASE_URL")
