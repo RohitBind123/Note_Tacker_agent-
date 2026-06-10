@@ -247,3 +247,61 @@ async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
     await db.commit()
     log.info("report_emailed", meeting_id=meeting.id, to=to, message_id=message_id)
     return message_id
+
+
+async def stop_meeting(
+    db: AsyncSession, meeting: Meeting, *, provider: BotProvider | None = None
+) -> bool:
+    """Stop the bot and move the meeting into PROCESSING immediately.
+
+    Critically, this does NOT wait for the provider to flip its own status:
+    Vexa can keep reporting a meeting 'active' for minutes after a stop (and
+    even after the human has left the call). Setting PROCESSING here lets the
+    scheduler's ``process_pending`` pass finalize (transcript -> insights ->
+    email) on the next tick, so the lifecycle never stalls on a stale provider
+    flag and the bot never lingers in an empty Meet.
+
+    Returns whether the provider acknowledged the stop. Stopping is best-effort;
+    the meeting is finalized either way.
+    """
+    provider = provider or get_provider()
+    ok = False
+    if meeting.vexa_bot_id:
+        try:
+            ok = await provider.stop(meeting.native_meeting_id)
+        except Exception as exc:  # best-effort: still finalize below
+            log.warning("stop_meeting_provider_error", meeting_id=meeting.id, error=str(exc))
+
+    if meeting.status in (MeetingStatus.JOINING, MeetingStatus.ACTIVE):
+        meeting.status = MeetingStatus.PROCESSING
+        meeting.end_time = meeting.end_time or _now()
+        await db.commit()
+        log.info("stop_meeting_processing", meeting_id=meeting.id, provider_ok=ok)
+    return ok
+
+
+async def finalize_meeting(
+    db: AsyncSession, meeting: Meeting, *, provider: BotProvider | None = None
+) -> None:
+    """Idempotently take an ended meeting through transcript -> insights -> email.
+
+    Safe to call repeatedly: a COMPLETED meeting is a no-op. This is the single
+    convergence point for finishing a meeting, whether it ended because the
+    provider said so, the user hit stop, or the scheduled end_time passed.
+    """
+    if meeting.status == MeetingStatus.COMPLETED:
+        return
+    provider = provider or get_provider()
+
+    await fetch_and_store_transcript(db, meeting, provider=provider)
+    try:
+        await run_analysis(db, meeting)
+    except Exception:
+        meeting.status = MeetingStatus.FAILED_ANALYSIS
+        await db.commit()
+        log.exception("finalize_analysis_error", meeting_id=meeting.id)
+        return
+
+    # send_report_email sets COMPLETED (or EMAIL_FAILED and re-raises).
+    await send_report_email(db, meeting)
+    log.info("finalize_completed", meeting_id=meeting.id)

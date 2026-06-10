@@ -37,6 +37,28 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def end_reason(
+    meeting: Meeting,
+    now: datetime,
+    *,
+    grace_seconds: int,
+    hard_timeout: timedelta,
+) -> str | None:
+    """Why an in-progress meeting should be force-ended now (or None to keep it).
+
+    Pure and side-effect-free so it is unit-testable. Used to stop a bot that is
+    lingering in a Meet past when the meeting should be over — the reliable
+    signals are the calendar's scheduled end_time and an absolute hard cap.
+    (Vexa cloud's participants_count is unreliable — it reports 0 even with a
+    human present — so it is intentionally NOT used here.)
+    """
+    if meeting.end_time is not None and now >= meeting.end_time + timedelta(seconds=grace_seconds):
+        return "past_end_time"
+    if meeting.bot_dispatched_at is not None and now >= meeting.bot_dispatched_at + hard_timeout:
+        return "hard_timeout"
+    return None
+
+
 async def _claim_due(db: AsyncSession) -> list[int]:
     """Atomically claim due SCHEDULED meetings -> JOINING. Returns claimed ids."""
     now = _now()
@@ -95,6 +117,7 @@ async def advance_active() -> None:
         ).scalars().all()
         active = [m.id for m in rows]
 
+    grace = settings.meeting_end_grace_seconds
     for meeting_id in active:
         async with async_session_factory() as db:
             meeting = await db.get(Meeting, meeting_id)
@@ -102,24 +125,46 @@ async def advance_active() -> None:
                 continue
             try:
                 meeting = await orchestrator.refresh_status(db, meeting, provider=provider)
-                if meeting.status == MeetingStatus.PROCESSING:
-                    # Meeting just ended -> capture transcript, then analyze.
-                    await orchestrator.fetch_and_store_transcript(db, meeting, provider=provider)
-                    try:
-                        await orchestrator.run_analysis(db, meeting)
-                        log.info("scheduler_meeting_analyzed", meeting_id=meeting_id)
-                    except Exception:
-                        meeting.status = MeetingStatus.FAILED_ANALYSIS
-                        await db.commit()
-                        log.exception("scheduler_analysis_error", meeting_id=meeting_id)
-                        continue
-                    try:
-                        await orchestrator.send_report_email(db, meeting)
-                        log.info("scheduler_meeting_completed", meeting_id=meeting_id)
-                    except Exception:
-                        log.exception("scheduler_email_error", meeting_id=meeting_id)
+                # If the provider still reports the bot in-flight, force-stop it
+                # once the meeting should be over so it never lingers in the Meet.
+                if meeting.status in (MeetingStatus.JOINING, MeetingStatus.ACTIVE):
+                    reason = end_reason(
+                        meeting, _now(), grace_seconds=grace, hard_timeout=_ACTIVE_TIMEOUT
+                    )
+                    if reason:
+                        log.info("auto_stopping_meeting", meeting_id=meeting_id, reason=reason)
+                        await orchestrator.stop_meeting(db, meeting, provider=provider)
+                # Finalization (transcript -> insights -> email) is handled by
+                # process_pending, the single convergence point for ended meetings.
             except Exception:
                 log.exception("scheduler_advance_error", meeting_id=meeting_id)
+
+
+async def process_pending() -> None:
+    """Finalize ended meetings (status PROCESSING) -> transcript -> insights -> email.
+
+    The single place that runs the insight pipeline, regardless of HOW the
+    meeting ended (provider reported it gone, user hit stop, or end_time passed).
+    Idempotent per meeting via orchestrator.finalize_meeting.
+    """
+    provider = get_provider()
+    async with async_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Meeting).where(Meeting.status == MeetingStatus.PROCESSING)
+            )
+        ).scalars().all()
+        pending = [m.id for m in rows]
+
+    for meeting_id in pending:
+        async with async_session_factory() as db:
+            meeting = await db.get(Meeting, meeting_id)
+            if meeting is None:
+                continue
+            try:
+                await orchestrator.finalize_meeting(db, meeting, provider=provider)
+            except Exception:
+                log.exception("scheduler_process_error", meeting_id=meeting_id)
 
 
 async def recover_stale() -> None:
@@ -162,7 +207,8 @@ async def recover_stale() -> None:
 
 
 async def tick() -> None:
-    """One scheduler iteration (recover + dispatch + advance)."""
+    """One scheduler iteration (recover + dispatch + advance + finalize)."""
     await recover_stale()
     await dispatch_due()
     await advance_active()
+    await process_pending()

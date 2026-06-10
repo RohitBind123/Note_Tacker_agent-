@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 30
     dispatch_lead_seconds: int = 60
     bot_status_poll_interval_seconds: int = 10
+    # Grace period after a meeting's scheduled end_time before the scheduler
+    # force-stops a still-active bot (so it never lingers in an empty Meet).
+    meeting_end_grace_seconds: int = 120
 
     # --- Database (Neon) ---
     # Pooled URL for the app runtime; direct (non-pooler) URL for migrations.

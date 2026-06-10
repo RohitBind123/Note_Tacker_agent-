@@ -22,7 +22,6 @@ from app.schemas.meetings import (
 )
 from app.services.meet_url import InvalidMeetUrl
 from app.services import orchestrator
-from app.services.vexa.factory import get_provider
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 log = get_logger(__name__)
@@ -124,7 +123,8 @@ async def send_email(meeting_id: int, db: AsyncSession = Depends(get_db)) -> Ema
 
 @router.post("/{meeting_id}/stop", response_model=StopResult)
 async def stop_meeting(meeting_id: int, db: AsyncSession = Depends(get_db)) -> StopResult:
+    # Stops the bot AND moves the meeting to PROCESSING so the scheduler emails
+    # the insights on the next tick — no waiting on the provider's stale status.
     meeting = await _get_meeting_or_404(db, meeting_id)
-    provider = get_provider()
-    ok = await provider.stop(meeting.native_meeting_id)
+    ok = await orchestrator.stop_meeting(db, meeting)
     return StopResult(meeting_id=meeting_id, stopped=ok)
