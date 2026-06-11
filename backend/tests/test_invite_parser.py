@@ -94,12 +94,39 @@ class TestOrganizerExtraction:
         )
         assert r.organizer_email == "alice@example.com"
 
-    def test_extracts_bare_email(self):
+    def test_calendar_notification_sender_is_not_an_organizer(self):
+        # calendar-notification@google.com is Google's automated sender, not a
+        # human. The real organizer is resolved by the calendar poller via the
+        # Calendar API, so the parser must not store this address.
         r = _parse(
             from_addr="calendar-notification@google.com",
             body="https://meet.google.com/abc-defg-hij",
         )
-        assert r.organizer_email == "calendar-notification@google.com"
+        assert r.organizer_email is None
+
+    def test_meetings_noreply_sender_is_not_an_organizer(self):
+        # The exact bug: a meet.google.com "Add people" invite is From
+        # meetings-noreply@google.com. Storing it as organizer mailed the insight
+        # into Google's no-reply void. It must resolve to None.
+        r = _parse(
+            from_addr="meetings-noreply@google.com",
+            body="https://meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email is None
+
+    def test_generic_noreply_sender_is_dropped(self):
+        r = _parse(
+            from_addr="No Reply <noreply@example.com>",
+            body="https://meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email is None
+
+    def test_real_human_sender_is_kept(self):
+        r = _parse(
+            from_addr="Priya <priya@acme.com>",
+            body="https://meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email == "priya@acme.com"
 
     def test_empty_from_gives_none(self):
         r = _parse(from_addr="", body="https://meet.google.com/abc-defg-hij")

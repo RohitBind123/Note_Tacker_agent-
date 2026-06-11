@@ -45,12 +45,32 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def resolve_recipients(meeting: Meeting, *, mode: str, bot_email: str) -> list[str]:
+def _is_deliverable(email: str) -> bool:
+    """False for empty/malformed addresses or Google no-reply senders.
+
+    An instant-meet invite's stored "organizer" is meetings-noreply@google.com;
+    mailing an insight there is a silent black hole (the exact bug this guards).
+    """
+    low = (email or "").strip().lower()
+    if not low or "@" not in low:
+        return False
+    return "noreply" not in low and "no-reply" not in low
+
+
+def resolve_recipients(
+    meeting: Meeting, *, mode: str, bot_email: str, fallback: str = ""
+) -> list[str]:
     """Who receives the insight email, per config mode.
 
     ``mode == "all_attendees"`` -> organizer + every invited guest; any other
-    value -> organizer only. Always excludes the bot's own address and
-    de-duplicates case-insensitively, with the organizer first. Pure/testable.
+    value -> organizer only. Excludes the bot's own address, drops undeliverable
+    no-reply addresses, and de-duplicates case-insensitively with the organizer
+    first.
+
+    When no deliverable recipient remains, fall back to ``fallback`` if set. The
+    fallback is an explicit, configured address, so it is honoured even if it
+    equals the bot's own inbox (unlike the organizer/attendee path, which
+    excludes the bot). Pure/testable.
     """
     emails: list[str] = []
     if meeting.organizer_email:
@@ -64,10 +84,15 @@ def resolve_recipients(meeting: Meeting, *, mode: str, bot_email: str) -> list[s
     for e in emails:
         cleaned = (e or "").strip()
         key = cleaned.lower()
-        if not key or key == bot or key in seen:
+        if not key or key == bot or key in seen or not _is_deliverable(cleaned):
             continue
         seen.add(key)
         out.append(cleaned)
+
+    if not out:
+        fb = (fallback or "").strip()
+        if _is_deliverable(fb):
+            return [fb]
     return out
 
 
@@ -257,7 +282,10 @@ async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
         raise RuntimeError(f"no report to email for meeting {meeting.id}")
 
     recipients = resolve_recipients(
-        meeting, mode=settings.email_recipients, bot_email=settings.bot_google_email
+        meeting,
+        mode=settings.email_recipients,
+        bot_email=settings.bot_google_email,
+        fallback=settings.report_fallback_email,
     )
     if not recipients:
         meeting.status = MeetingStatus.EMAIL_FAILED

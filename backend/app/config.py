@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # Who receives the insight email: "organizer" (default) or "all_attendees"
     # (organizer + every invited guest, excluding the bot itself).
     email_recipients: str = Field(default="organizer", alias="EMAIL_RECIPIENTS")
+    # Fallback insight-email recipient when no human organizer/attendee can be
+    # resolved (e.g. a meet.google.com instant invite arrives only From Google's
+    # no-reply address). Empty -> no fallback (meeting marked EMAIL_FAILED).
+    # This is an explicit, configured address, so it is honoured even if it equals
+    # BOT_GOOGLE_EMAIL (the bot mailing its own inbox is a valid, readable target).
+    report_fallback_email: str = Field(default="", alias="REPORT_FALLBACK_EMAIL")
 
     # --- Database (Neon) ---
     # Pooled URL for the app runtime; direct (non-pooler) URL for migrations.
