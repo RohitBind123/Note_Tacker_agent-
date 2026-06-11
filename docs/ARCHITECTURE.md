@@ -4,12 +4,25 @@ End-to-end goal: **invite `centralagentai@gmail.com` to a Google Meet → bot jo
 → transcribes → Gemini insights → email the organizer.** No meeting URL needed,
 no human action except (today) one "Admit" click for the anonymous cloud bot.
 
-- **Runtime:** one FastAPI process on Railway (amd64) + Neon Postgres.
-- **Concurrency model:** three in-process `asyncio` loops (calendar poller +
-  Gmail scanner + scheduler). The DB *is* the work queue — no Celery/Redis broker.
+**Phase 2 (live) adds an in-meeting copilot:** during the call, anyone can type
+`@centralagent <question>` in the Meet chat and get a grounded answer back in a
+few seconds, plus an instant (~10s) summary email the moment the meeting ends.
+Phase 2 lives entirely in §4b; Phase 1 (detection → join → transcribe → email)
+is unchanged below it.
+
+- **Runtime:** one FastAPI process on Railway (amd64) + Neon Postgres (with the
+  `pgvector` extension for Phase 2 retrieval).
+- **Concurrency model:** up to **five** in-process `asyncio` loops — calendar
+  poller + Gmail scanner + scheduler (Phase 1), plus copilot-chat + copilot-memory
+  (Phase 2, only when `COPILOT_ENABLED=true`). The DB *is* the work queue — no
+  Celery/Redis broker.
 - **Detection — two independent paths:** **poll** the bot's own calendar every
   60s (§3) **and** **scan** the bot's Gmail inbox every 90s (§3b) for Meet invites
   that create no Calendar event. Calendar push is built but off (§2).
+- **Finalize — two paths, fastest wins:** a Vexa **webhook** (`meeting.completed`
+  → `/webhooks/vexa`) finalizes within ~10s of the meeting ending; the scheduler's
+  `process_pending` pass is the always-on fallback (§4b). At-least-once delivery is
+  deduped to exactly one email by a per-meeting lock.
 
 ---
 
@@ -339,6 +352,111 @@ empty Meet for hours.
 
 ---
 
+## 4b. Phase 2 — the in-meeting copilot (loops 4 & 5 + a webhook)
+
+Files: `services/copilot/{live,capture,router,triggers,chunker,retrieval,memory,engine}.py`,
+`api/routes/webhooks.py`, `db/copilot_models.py`. Active only when
+`COPILOT_ENABLED=true`; Phase 1 runs unchanged without it.
+
+Two more timer loops run **for the duration of each live meeting** (any meeting
+in `JOINING`/`ACTIVE` with a dispatched bot), iterating each meeting in its own
+session with the same one-bad-meeting-can't-stall-the-rest discipline as the
+scheduler.
+
+| | **LOOP 4 — `copilot_chat`** (fast) | **LOOP 5 — `copilot_memory`** (slow) |
+|---|---|---|
+| Wakes every | `COPILOT_CHAT_POLL_INTERVAL_SECONDS` = **4s** | `COPILOT_MEMORY_REFRESH_SECONDS` = **60s** |
+| Does | capture chat → answer `@centralagent` mentions; index new transcript chunks | rebuild the rolling meeting memory (summary/decisions/actions/risks/open-Qs) |
+| Cost guard | only NEW chunks are embedded (incremental) | skips the paid Gemini call unless the transcript grew ≥ `MIN_GROWTH_CHARS` (400) |
+
+```
+              GOOGLE MEET CHAT  (held by the Vexa bot)
+   ┌──────────────────────────────────────────────────────┐
+   │  user: @centralagent what did we decide on pricing?   │
+   └──────────────────────────┬───────────────────────────┘
+                              │ get_chat (REST poll) every 4s
+                              ▼
+   ┌───────────────────────────────────────────────────────────────┐
+   │  LOOP 4 copilot_chat_tick  (per live meeting)                  │
+   │   capture.capture_chat:                                        │
+   │     • persist each message ONCE                                │
+   │       (unique on meeting_id + sha256(sender|ts|text))          │
+   │     • is it a human "@centralagent ..."? → handle_mention ↓    │
+   │   index_transcript:                                            │
+   │     • chunk the transcript, embed + store only NEW chunks      │
+   │       (idempotent on meeting_id + chunk_index)                 │
+   └──────────────────────────┬────────────────────────────────────┘
+                              │ handle_mention (router.py)
+                              ▼
+   ┌───────────────────────────────────────────────────────────────┐
+   │  1. CLAIM the mention exactly once                             │
+   │       INSERT copilot_interactions ... ON CONFLICT (chat_msg_id)│
+   │       DO NOTHING RETURNING id   — lose the race → no-op        │
+   │  2. ASSEMBLE grounding context:                                │
+   │       • retrieve_context: top-K transcript chunks most similar │
+   │         to the question (pgvector cosine, HNSW index)          │
+   │       • the rolling meeting memory row                         │
+   │       • the last few human chat lines                          │
+   │       • the meeting title                                      │
+   │  3. CopilotEngine.answer → Gemini, grounded ("use ONLY this;   │
+   │       if absent, say you haven't caught it yet")               │
+   │  4. send_chat the answer back into the Meet chat               │
+   │  5. record answer + grounding chunk ids on the interaction     │
+   └───────────────────────────────────────────────────────────────┘
+```
+
+### Retrieval, in one paragraph
+`chunker.chunk_segments` splits the transcript deterministically from the start,
+so chunk *i*'s text is stable as the meeting grows — that's what makes
+"embed only new chunk indices" correct and cheap. Each chunk is embedded to a
+**768-dim vector** (Gemini `gemini-embedding-001`) and stored in
+`transcript_chunks.embedding` (`pgvector`), indexed with **HNSW cosine**. A
+question is embedded the same way; `retrieve_context` returns the top-K nearest
+chunks by cosine distance. The chunk text — not the raw vectors — is what the
+answer is grounded on.
+
+### Rolling memory (LOOP 5)
+`memory.refresh_memory` extracts a structured snapshot (summary + decisions +
+action items + risks + open questions) via Gemini structured output and upserts
+the single `meeting_memory` row per meeting. The **delta guard**
+(`should_rebuild`) skips the model call unless the transcript grew ≥ 400 chars
+since `transcript_chars` (the last covered point); a too-short transcript writes
+an empty memory rather than risk invented owners/decisions. Verified in prod:
+idle ticks log `copilot_memory_skip_no_growth`.
+
+### Instant finalize via the Vexa webhook
+Registered at boot by `runner._register_vexa_webhook` (needs `COPILOT_ENABLED`,
+an HTTPS `PUBLIC_BASE_URL`, and `VEXA_WEBHOOK_SECRET`). `POST /webhooks/vexa`:
+
+```
+verify HMAC signature (fail-closed) → reject stale timestamps →
+ring-buffer dedup on event_id → find the meeting by native id →
+mark JOINING/ACTIVE → PROCESSING (+ end_time) → fire-and-forget finalize
+```
+
+Vexa delivers `meeting.completed` **at least once** (observed 4× in prod). A
+per-meeting `asyncio.Lock` + a `finalize_already_completed` no-op collapse the
+duplicates to **exactly one** insight email. If the webhook never arrives (no
+secret, plain-http dev), nothing breaks — `process_pending` (§4) still finalizes
+on its next lap; the webhook only buys latency (~10s vs one scheduler lap).
+
+### Two idempotency anchors (no dupes, ever)
+| Risk | Guard |
+|---|---|
+| Same chat message seen twice (poll re-read / provider retry) | `meeting_chat_messages` unique on `(meeting_id, dedup_key)`; insert is `ON CONFLICT DO NOTHING RETURNING id` — only the first delivery is routed |
+| Same `@mention` answered twice | `copilot_interactions.chat_message_id` UNIQUE; the router only proceeds if it WON the insert |
+| Same `meeting.completed` webhook delivered N times | per-meeting lock + COMPLETED no-op → one email |
+
+### Phase 2 tables (`db/copilot_models.py`, migration `d4e5f6a7b8c9`)
+| Table | Holds |
+|---|---|
+| `meeting_chat_messages` | every captured chat line (deduped); `is_mention` flags the actionable ones |
+| `copilot_interactions` | one row per answered `@mention` — question, answer, model, grounding chunk ids, status |
+| `transcript_chunks` | chunked transcript + 768-dim `embedding` (pgvector, HNSW cosine) |
+| `meeting_memory` | one rolling structured memory row per meeting |
+
+---
+
 ## 5. Meeting state machine
 
 ```
@@ -416,7 +534,7 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 
 | Component | File | Role | Cadence |
 |---|---|---|---|
-| **Lifespan / runner** | `services/runner.py` | starts/stops the 3 loops | once at boot |
+| **Lifespan / runner** | `services/runner.py` | starts/stops the loops (3 Phase-1 + 2 Phase-2) + registers the Vexa webhook | once at boot |
 | **Calendar poller** | `services/calendar_poller.py` | detect + auto-RSVP + upsert | **60s** |
 | **Calendar client** | `services/google/calendar.py` | GET events / PATCH RSVP | per poll |
 | **Gmail scanner** | `services/gmail_scanner.py` | detect Meet invites with no Calendar event + upsert | **90s** (flag-gated) |
@@ -428,10 +546,17 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 | **Vexa provider** | `services/vexa/{provider,cloud_provider,factory}.py` | bot join/status/transcript/stop | per call |
 | **Gemini analyzer** | `services/gemini/analyzer.py` | transcript → structured insights | per meeting |
 | **Gmail sender** | `services/gmail/sender.py` + `email_template.py` | insight email as the bot | per meeting |
+| **Copilot — chat loop** | `services/copilot/live.py` (`copilot_chat_tick`) | capture chat, answer mentions, index chunks (Phase 2) | **4s** |
+| **Copilot — memory loop** | `services/copilot/live.py` (`copilot_memory_tick`) | rebuild rolling meeting memory (Phase 2) | **60s** |
+| **Copilot — capture/router** | `services/copilot/{capture,router,triggers}.py` | dedup chat, parse `@mention`, answer once | per new message |
+| **Copilot — retrieval** | `services/copilot/{chunker,retrieval}.py` | chunk + embed transcript, pgvector top-K | per tick / per question |
+| **Copilot — memory/engine** | `services/copilot/{memory,engine}.py` | structured memory + grounded Gemini answer | per refresh / per question |
+| **Embeddings** | `services/gemini/embeddings.py` | 768-dim Gemini embeddings (docs + query) | per chunk / per question |
+| **Vexa webhook** | `api/routes/webhooks.py` | `meeting.completed` → instant finalize (deduped) | per event |
 | **HTTP helper** | `services/http.py` | timeouts + bounded retries on all external calls | every call |
 | **Config** | `config.py` | all settings from `.env`; fail-fast `missing_required()` | at import |
-| **DB** | `db/` (Neon Postgres) | `meetings`,`transcripts`,`meeting_reports` | — |
-| **API** | `api/routes/` | health, meetings (dispatch/status/transcript/analyze/report/email/stop), admin, webhooks | per request |
+| **DB** | `db/` (Neon Postgres + pgvector) | `meetings`,`transcripts`,`meeting_reports`; Phase 2: `meeting_chat_messages`,`copilot_interactions`,`transcript_chunks`,`meeting_memory` | — |
+| **API** | `api/routes/` | health, meetings (dispatch/status/transcript/analyze/report/email/stop), admin, webhooks (calendar + vexa) | per request |
 
 ---
 
@@ -450,6 +575,15 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 | `email_recipients` | organizer | who gets the insight email: `organizer` or `all_attendees` |
 | `calendar_push_enabled` | false | push vs poll (needs a verified domain) |
 | `gemini_model` | gemini-2.5-flash | insight model |
+| **— Phase 2 copilot —** | | |
+| `copilot_enabled` | false | master switch for LOOP 4/5 + the Vexa webhook (§4b) |
+| `copilot_chat_poll_interval_seconds` | 4 | LOOP 4 cadence (chat capture + answer + index) |
+| `copilot_memory_refresh_seconds` | 60 | LOOP 5 cadence (rolling memory rebuild) |
+| `copilot_context_top_k` | 6 | how many transcript chunks ground each answer |
+| `copilot_bot_name` | CentralAgent | name the copilot uses when answering |
+| `copilot_triggers` | `@centralagent` | mention handle(s) that route a chat line to the copilot |
+| `copilot_thinking_ack_enabled` | false | post a "thinking…" placeholder before answering — OFF: Meet chat is append-only so it can't be replaced by the answer; answers land in ~3s anyway |
+| `vexa_webhook_secret` | "" | HMAC secret for `/webhooks/vexa`; empty → webhook fails closed (scheduler still finalizes) |
 | Required (`missing_required`) | — | `DATABASE_URL`, `VEXA_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_OAUTH_*`, `BOT_GOOGLE_EMAIL` — app refuses to boot in prod if any is unset |
 
 ---
@@ -494,6 +628,24 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
    WHERE ...`) — `ON CONSTRAINT <name>` does **not** resolve a partial index and
    crashed every scan tick in prod until fixed; a compile-level test now guards the
    SQL shape. Full write-up: CHALLENGES §5.10.
+9. **Copilot answers are retrieval-grounded, never free-form (§4b).** A meeting
+   copilot that invents decisions is worse than one that admits it missed
+   something. Every answer is built from top-K transcript chunks + the rolling
+   memory + recent chat, and the prompt forbids going beyond them. The transcript
+   is chunked deterministically from the start so growth only ever embeds the new
+   tail (cheap, incremental), and pgvector HNSW makes "closest chunks" fast.
+10. **Exactly-once everywhere on the live path.** Chat is polled (at-least-once)
+    and the Vexa webhook is delivered at-least-once (4× in prod), so every live
+    write is idempotent: chat messages dedup on a content hash, mentions dedup on
+    `chat_message_id`, and `meeting.completed` collapses to one email via a
+    per-meeting lock. Correctness never depends on a delivery arriving exactly once.
+11. **In-chat "thinking…" placeholder defaulted OFF.** Google Meet chat is
+    **append-only** — no edit/delete API — so a placeholder can never be *replaced*
+    by the answer the way ChatGPT/Perplexity do; it would linger as a permanent
+    stale line above every reply. With answers landing in ~3s, that's clutter, not
+    feedback. The helper + `COPILOT_THINKING_ACK_ENABLED` gate remain so it can be
+    re-enabled if a future platform supports message replacement; the faster 4s
+    chat poll (the part that actually helped responsiveness) stayed.
 
 ---
 
