@@ -42,6 +42,35 @@ _ISO_DT_RE = re.compile(
     r"\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\b"
 )
 
+# Google's automated senders for Meet/Calendar notifications. These are NEVER a
+# real person we can deliver an insight email to: a meet.google.com "Add people"
+# invite arrives From meetings-noreply@google.com, and calendar notices come From
+# calendar-notification@google.com. The real organizer of a calendar meeting is
+# resolved by the calendar poller via the Calendar API; for instant-meet invites
+# there is no human address in the headers at all, so we store None and let the
+# recipient resolver apply its configured fallback.
+_NONHUMAN_SENDERS = frozenset(
+    {
+        "meetings-noreply@google.com",
+        "calendar-notification@google.com",
+    }
+)
+
+
+def _human_organizer(from_addr: str) -> str | None:
+    """Return the sender address only if it could be a real, emailable human.
+
+    Drops empty headers and Google's automated no-reply / notification senders.
+    """
+    _, addr = parseaddr(from_addr)
+    addr = (addr or "").strip()
+    if not addr:
+        return None
+    low = addr.lower()
+    if low in _NONHUMAN_SENDERS or "noreply" in low or "no-reply" in low:
+        return None
+    return addr
+
 
 @dataclass(frozen=True)
 class ParsedInvite:
@@ -79,12 +108,10 @@ def parse(
     # 2. Title: strip known Google prefixes and trailing time suffix from subject.
     title = _extract_title(subject)
 
-    # 3. Organizer: prefer From header. For Google-generated notification emails
-    #    the From is calendar-notification@google.com, so we keep it as-is here —
-    #    the scanner can override with a better source if available.
-    _, organizer_email = parseaddr(from_addr)
-    if not organizer_email:
-        organizer_email = None
+    # 3. Organizer: the From header, but ONLY if it is a real human. Google's
+    #    notification senders (meetings-noreply@, calendar-notification@) are not
+    #    deliverable, so we store None and let the recipient resolver fall back.
+    organizer_email = _human_organizer(from_addr)
 
     # 4. Scheduled time: optional, parse only unambiguous ISO timestamps.
     start_time = _extract_start_time(body_text)
