@@ -49,6 +49,8 @@ go through one OAuth client.
 4. **Scopes** — the app uses:
    - `https://www.googleapis.com/auth/calendar.events` (read **+ write**, so the bot can auto-RSVP "yes")
    - `https://www.googleapis.com/auth/gmail.send`
+   - `https://www.googleapis.com/auth/gmail.readonly` (the Gmail invite scanner
+     reads the inbox for Meet invites that create no Calendar event)
    - `openid`, `https://www.googleapis.com/auth/userinfo.email`
 
 ### 2.3 OAuth client (Desktop)
@@ -166,7 +168,7 @@ credential is wired correctly.
 - [ ] `BOT_GOOGLE_EMAIL` set to the dedicated bot account
 - [ ] GCP project created; Calendar API + Gmail API enabled
 - [ ] OAuth consent = External; bot added as **test user**
-- [ ] Scopes include `calendar.events` (read-write) + `gmail.send`
+- [ ] Scopes include `calendar.events` (read-write) + `gmail.send` + `gmail.readonly`
 - [ ] Desktop OAuth client → `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET`
 - [ ] Refresh token captured → `GOOGLE_OAUTH_REFRESH_TOKEN`
 - [ ] Calendar **"Add invitations → From everyone"** set
