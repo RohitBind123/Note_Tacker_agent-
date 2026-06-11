@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.gmail.reader import GmailMessage
-from app.services.gmail_scanner import scan_once
+from app.services.gmail_scanner import build_meeting_upsert, scan_once
 
 UTC = timezone.utc
 
@@ -261,6 +261,28 @@ async def test_skips_invite_already_tracked_by_native_id():
     # dedup SELECT + in-flight SELECT ran; NO insert, NO commit.
     assert db.execute.call_count == 2
     db.commit.assert_not_called()
+
+
+def test_upsert_targets_partial_index_not_constraint():
+    """Regression guard for the prod crash: the upsert must target the partial
+    unique INDEX via inference, never `ON CONSTRAINT`.
+
+    uq_meetings_gmail_message_id is a partial unique *index*, not a table
+    constraint. `ON CONFLICT ON CONSTRAINT <name>` raises
+    `constraint "..." does not exist` against an index at runtime. A mocked
+    `db.execute()` can't see this — only compiling the statement catches it.
+    """
+    from sqlalchemy.dialects.postgresql import dialect
+
+    stmt = build_meeting_upsert(
+        [{"gmail_message_id": "m1", "native_meeting_id": "abc-defg-hij"}]
+    )
+    sql = str(stmt.compile(dialect=dialect())).upper()
+
+    assert "ON CONFLICT (GMAIL_MESSAGE_ID)" in sql
+    assert "WHERE GMAIL_MESSAGE_ID IS NOT NULL" in sql
+    # The exact form that crashed prod must never come back.
+    assert "ON CONSTRAINT" not in sql
 
 
 @pytest.mark.asyncio

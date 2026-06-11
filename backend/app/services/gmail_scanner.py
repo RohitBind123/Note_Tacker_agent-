@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,41 @@ from app.services.gmail.invite_parser import parse as parse_invite
 from app.services.gmail.reader import GmailReader
 
 log = get_logger(__name__)
+
+
+def build_meeting_upsert(rows: list[dict]):
+    """Build the idempotent upsert for Gmail-sourced meeting rows.
+
+    On conflict (same Gmail message ID seen again) refresh metadata but NEVER
+    touch status / vexa_bot_id — identical invariant to calendar_poller.
+
+    Extracted from ``scan_once`` so the generated SQL is unit-testable without a
+    live DB. The partial-index-vs-constraint distinction (see below) is invisible
+    to a mocked ``execute()`` and can only be caught by compiling the statement,
+    which is exactly how it slipped into prod the first time.
+
+    Targets the PARTIAL UNIQUE INDEX uq_meetings_gmail_message_id via index
+    inference, NOT ``constraint=``. The index is
+    ``CREATE UNIQUE INDEX ... WHERE gmail_message_id IS NOT NULL`` — an *index*,
+    not a table CONSTRAINT. Postgres ``ON CONFLICT ON CONSTRAINT <name>`` only
+    resolves real constraints (PK / UNIQUE / EXCLUDE) and raises
+    ``constraint "..." does not exist`` for an index. The inference form
+    ``ON CONFLICT (gmail_message_id) WHERE gmail_message_id IS NOT NULL`` is the
+    correct match; the index_where predicate must mirror the index WHERE exactly.
+    """
+    stmt = pg_insert(Meeting).values(rows)
+    return stmt.on_conflict_do_update(
+        index_elements=["gmail_message_id"],
+        index_where=Meeting.gmail_message_id.isnot(None),
+        set_={
+            "native_meeting_id": stmt.excluded.native_meeting_id,
+            "meet_url": stmt.excluded.meet_url,
+            "title": stmt.excluded.title,
+            "organizer_email": stmt.excluded.organizer_email,
+            "start_time": stmt.excluded.start_time,
+            "end_time": stmt.excluded.end_time,
+        },
+    )
 
 
 async def scan_once(
@@ -159,26 +194,8 @@ async def scan_once(
         log.info("gmail_scan_all_tracked", checked=len(parsed_by_mid))
         return 0
 
-    # 4. Upsert — idempotent on gmail_message_id.
-    #    On conflict (same Gmail message ID seen again), refresh metadata but
-    #    NEVER touch status / vexa_bot_id — identical invariant to calendar_poller.
-    stmt = pg_insert(Meeting).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        # Reference the partial index by name — the most robust form for
-        # partial indexes; avoids SQLAlchemy dialect quirks around column
-        # objects + index_where that can produce a "no matching constraint"
-        # error at runtime when no column-level unique constraint exists.
-        constraint="uq_meetings_gmail_message_id",
-        set_={
-            "native_meeting_id": stmt.excluded.native_meeting_id,
-            "meet_url": stmt.excluded.meet_url,
-            "title": stmt.excluded.title,
-            "organizer_email": stmt.excluded.organizer_email,
-            "start_time": stmt.excluded.start_time,
-            "end_time": stmt.excluded.end_time,
-        },
-    )
-    await db.execute(stmt)
+    # 4. Upsert — idempotent on the partial unique index over gmail_message_id.
+    await db.execute(build_meeting_upsert(rows))
     await db.commit()
     log.info("gmail_scan_upserted", count=len(rows))
     return len(rows)
