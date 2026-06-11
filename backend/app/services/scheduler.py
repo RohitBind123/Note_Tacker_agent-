@@ -59,6 +59,25 @@ def end_reason(
     return None
 
 
+def dispatch_window_missed(
+    meeting: Meeting, now: datetime, *, stale_after: timedelta
+) -> bool:
+    """True if a not-yet-dispatched meeting's start time is too far past to join.
+
+    Mirrors the lower bound of ``_claim_due``: that pass only claims meetings whose
+    scheduled start is within the last ``stale_after``. Once start_time is older
+    than that, the dispatcher will NEVER pick the meeting up, so a SCHEDULED/PENDING
+    row that still has no bot is unrecoverable and must be retired to a terminal
+    state instead of hanging in SCHEDULED forever. Pure / side-effect-free so it is
+    unit-testable; the status and "no bot yet" filters live in the SQL query.
+
+    Boundary matches ``_claim_due`` exactly: that pass claims ``start_time >= now -
+    stale_after`` (boundary still claimable), so a meeting is "missed" only when
+    strictly older, i.e. ``now > start_time + stale_after``.
+    """
+    return meeting.start_time is not None and now > meeting.start_time + stale_after
+
+
 async def _claim_due(db: AsyncSession) -> list[int]:
     """Atomically claim due SCHEDULED meetings -> JOINING. Returns claimed ids."""
     now = _now()
@@ -202,7 +221,37 @@ async def recover_stale() -> None:
             m.end_time = m.end_time or now
             log.warning("recovered_ancient_active", meeting_id=m.id)
 
-        if stuck or ancient:
+        # SCHEDULED/PENDING whose dispatch window irrecoverably passed (start_time
+        # older than _STALE_AFTER, so _claim_due will never claim it) and which
+        # never received a bot -> retire to a terminal state so it cannot hang in
+        # SCHEDULED forever. recover_stale runs before dispatch_due in the same
+        # tick and the two boundaries align (dispatch claims >= now-_STALE_AFTER,
+        # this fails < now-_STALE_AFTER), so no meeting is both retired and
+        # dispatched in one tick.
+        missed = (
+            await db.execute(
+                select(Meeting).where(
+                    Meeting.status.in_([MeetingStatus.SCHEDULED, MeetingStatus.PENDING]),
+                    Meeting.vexa_bot_id.is_(None),
+                    Meeting.start_time.is_not(None),
+                    Meeting.start_time < now - _STALE_AFTER,
+                )
+            )
+        ).scalars().all()
+        for m in missed:
+            m.status = MeetingStatus.FAILED_JOIN
+            m.failure_reason = (
+                "missed dispatch window: scheduled start passed by more than "
+                f"{int(_STALE_AFTER.total_seconds() // 60)} minutes before a bot "
+                "could be dispatched"
+            )
+            log.warning(
+                "recovered_missed_window",
+                meeting_id=m.id,
+                start_time=m.start_time.isoformat(),
+            )
+
+        if stuck or ancient or missed:
             await db.commit()
 
 
