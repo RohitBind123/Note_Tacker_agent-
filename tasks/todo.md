@@ -129,7 +129,7 @@ copilot engine context = retrieval(pgvector) + recent chat + meeting memory + me
 - [x] config.py: COPILOT_ENABLED, COPILOT_TRIGGERS(csv, "@centralagent"), VEXA_WS_URL,
       COPILOT_CHAT_POLL_INTERVAL_SECONDS, GEMINI_EMBED_MODEL(gemini-embedding-001), EMBED_DIMENSIONS(768),
       VEXA_WEBHOOK_SECRET, COPILOT_MEMORY_REFRESH_SECONDS, COPILOT_CONTEXT_TOP_K.
-- [ ] Bot joins as visible name "CentralAgent" (so @centralagent is discoverable). -> Batch 6 wiring.
+- [x] Bot joins as visible name "CentralAgent" (so @centralagent is discoverable). (Batch 6: orchestrator dispatch_by_url/dispatch_existing default to settings.copilot_bot_name.)
 - [x] Tests: settings parse / trigger csv split. (test_copilot_config.py)
 
 ### Batch 1 — DB models + pgvector migration  [DONE aa0a71d]
@@ -158,10 +158,14 @@ copilot engine context = retrieval(pgvector) + recent chat + meeting memory + me
 - [x] Tests: trigger parse table (13) + engine context render + answer mocked (6). Router DB claim validated in E2E. Suite 163 green.
 - NOTE: intent routing (decisions/action-items/what-did-X-say) is handled by grounding the single LLM call with the right context, not hardcoded intents — the memory+retrieval context covers all four.
 
-### Batch 6 — Live wiring (WS manager + webhook endpoint + runner)
-- [ ] WS manager loop (gated COPILOT_ENABLED): one conn, subscribe all ACTIVE meetings, route chat->router, transcript->memory/chunker; reconnect; poll fallback.
-- [ ] POST /webhooks/vexa: verify HMAC+timestamp, dedup event_id, on meeting.completed -> finalize now. Register webhook at startup (prod https).
-- [ ] Tests: signature verify; endpoint (valid/invalid sig, replay, dup event).
+### Batch 6 — Live wiring (copilot loops + webhook endpoint + runner)  [DONE]
+- [x] Live capture loops (gated COPILOT_ENABLED), poll channel (COPILOT_LIVE_CHANNEL=poll, the verified-reliable default per the SSE/WS-before-polling rule; the Batch-2 WS client is opt-in once validated live, never both at once):
+      - copilot_chat (fast, COPILOT_CHAT_POLL_INTERVAL_SECONDS): provider.get_chat -> capture.capture_chat (persist idempotent on (meeting_id, dedup_key); route NEW @mentions to handle_mention) + index_transcript (embed only new chunks). (live.py, capture.py)
+      - copilot_memory (slow, COPILOT_MEMORY_REFRESH_SECONDS): refresh_memory (paid build, growth-guarded). (live.py)
+- [x] POST /webhooks/vexa: verify HMAC over f"{timestamp}.".encode()+raw_body (constant-time) + replay-window check; dedup event_id (in-proc ring); on meeting.completed -> mark PROCESSING (durable; scheduler is safety net) + fire-and-forget instant finalize. Fast 200; 401 only on bad sig/stale. (webhook.py pure verify/parse + webhooks.py endpoint)
+- [x] In-process per-meeting finalize lock in orchestrator.finalize_meeting so the webhook task and scheduler.process_pending converge to exactly one insight email (single event loop -> asyncio.Lock suffices; re-reads status under lock).
+- [x] Register Vexa webhook at startup (prod https + secret; no-op otherwise -> scheduler remains always-on fallback). (runner.py _register_vexa_webhook)
+- [x] Tests: HMAC verify/timestamp/parse (test_copilot_webhook.py, 14); dedup_key (test_copilot_capture.py, 4); endpoint security+idempotency gates over ASGI, non-DB branches (test_webhooks_vexa.py, 6). DB finalize/route paths validated in Batch 7 E2E. Suite 191 green.
 
 ### Batch 7 — Real E2E
 - [ ] Live: bot joins as CentralAgent; "@centralagent summarize so far" -> reply in chat; memory populated; webhook instant finalize; retrieval "what did X say". Deploy to Railway (with confirmation).

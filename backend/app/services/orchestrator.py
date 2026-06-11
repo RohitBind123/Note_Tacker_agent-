@@ -5,6 +5,7 @@ same functions once meetings come from the calendar.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -43,6 +44,22 @@ _VEXA_TO_STATUS = {
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Per-meeting finalize locks. The whole app runs in a single process / event loop
+# (one uvicorn worker + in-process asyncio runner loops), so an asyncio.Lock keyed
+# by meeting id is enough to serialize finalize_meeting across its callers — the
+# scheduler's process_pending pass and the Vexa webhook's instant-finalize task —
+# and guarantee the insight email is sent exactly once even if both fire at once.
+_finalize_locks: dict[int, asyncio.Lock] = {}
+
+
+def _finalize_lock(meeting_id: int) -> asyncio.Lock:
+    lock = _finalize_locks.get(meeting_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _finalize_locks[meeting_id] = lock
+    return lock
 
 
 def _is_deliverable(email: str) -> bool:
@@ -102,12 +119,13 @@ async def dispatch_by_url(
     *,
     title: str | None = None,
     organizer_email: str | None = None,
-    bot_name: str = "CentralAgent Notetaker",
+    bot_name: str | None = None,
     provider: BotProvider | None = None,
 ) -> Meeting:
     """Create a meeting row and send a bot to the given Meet URL."""
     native_id = parse_native_meeting_id(meet_url)
     provider = provider or get_provider()
+    bot_name = bot_name or settings.copilot_bot_name
 
     meeting = Meeting(
         platform="google_meet",
@@ -148,11 +166,12 @@ async def dispatch_existing(
     db: AsyncSession,
     meeting: Meeting,
     *,
-    bot_name: str = "CentralAgent Notetaker",
+    bot_name: str | None = None,
     provider: BotProvider | None = None,
 ) -> Meeting:
     """Send a bot for a meeting row that already exists (e.g. from the calendar)."""
     provider = provider or get_provider()
+    bot_name = bot_name or settings.copilot_bot_name
     log.info(
         "dispatch_existing_start",
         meeting_id=meeting.id,
@@ -348,23 +367,32 @@ async def finalize_meeting(
 ) -> None:
     """Idempotently take an ended meeting through transcript -> insights -> email.
 
-    Safe to call repeatedly: a COMPLETED meeting is a no-op. This is the single
-    convergence point for finishing a meeting, whether it ended because the
-    provider said so, the user hit stop, or the scheduled end_time passed.
+    Safe to call repeatedly AND concurrently: a per-meeting in-process lock
+    serializes callers (the scheduler's process_pending pass and the Vexa
+    webhook's instant-finalize task), and a COMPLETED meeting is a no-op. This
+    is the single convergence point for finishing a meeting, whether it ended
+    because the provider said so, the user hit stop, the webhook fired, or the
+    scheduled end_time passed.
     """
-    if meeting.status == MeetingStatus.COMPLETED:
-        return
-    provider = provider or get_provider()
+    async with _finalize_lock(meeting.id):
+        # Re-read under the lock: another caller may have completed this meeting
+        # while we waited. The two callers use different sessions, so refresh to
+        # see the committed status rather than this instance's stale copy.
+        await db.refresh(meeting)
+        if meeting.status == MeetingStatus.COMPLETED:
+            log.info("finalize_already_completed", meeting_id=meeting.id)
+            return
+        provider = provider or get_provider()
 
-    await fetch_and_store_transcript(db, meeting, provider=provider)
-    try:
-        await run_analysis(db, meeting)
-    except Exception:
-        meeting.status = MeetingStatus.FAILED_ANALYSIS
-        await db.commit()
-        log.exception("finalize_analysis_error", meeting_id=meeting.id)
-        return
+        await fetch_and_store_transcript(db, meeting, provider=provider)
+        try:
+            await run_analysis(db, meeting)
+        except Exception:
+            meeting.status = MeetingStatus.FAILED_ANALYSIS
+            await db.commit()
+            log.exception("finalize_analysis_error", meeting_id=meeting.id)
+            return
 
-    # send_report_email sets COMPLETED (or EMAIL_FAILED and re-raises).
-    await send_report_email(db, meeting)
-    log.info("finalize_completed", meeting_id=meeting.id)
+        # send_report_email sets COMPLETED (or EMAIL_FAILED and re-raises).
+        await send_report_email(db, meeting)
+        log.info("finalize_completed", meeting_id=meeting.id)
