@@ -35,3 +35,9 @@ dist/
 *.log
 recordings/
 tmp/
+
+# --- Internal docs (kept locally, not shared) ---
+docs/API_REFERENCE.md
+docs/CHALLENGES.md
+docs/DOCKER_EXPLAINED.md
+docs/HOW_IT_WORKS_WALKTHROUGH.md

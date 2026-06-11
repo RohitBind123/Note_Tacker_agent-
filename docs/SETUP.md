@@ -1,8 +1,7 @@
 # CentralAgent — Setup & Credentials Guide
 
 How to obtain **every** credential the app needs and wire it into `.env`. This is
-the most involved part of the project (most of [CHALLENGES.md](./CHALLENGES.md)
-§3–4 lives here), so follow it top to bottom.
+the most involved part of the project, so follow it top to bottom.
 
 All secrets live **only** in the gitignored `.env` at the repo root. Start from
 the template:
