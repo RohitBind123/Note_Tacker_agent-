@@ -453,6 +453,59 @@ for m in missed:
 > ancient `JOINING`/`ACTIVE` → `PROCESSING`; missed-window `SCHEDULED`/`PENDING` →
 > `FAILED_JOIN`.
 
+### 5.10 Bot never joined a meeting made from meet.google.com — the detection gap
+- **Symptom:** A real meeting (`dwz-mvzb-esz`) was created directly on
+  **meet.google.com** and the bot was invited via **Add people**. The bot never
+  joined. Railway logs showed `calendar_listed total=0 with_meet=0` for the
+  entire window — the poller saw **nothing**.
+- **Root cause:** The system had exactly **one** detection path — the Google
+  **Calendar** poller. A meeting created from meet.google.com (rather than from
+  Calendar) produces **no Calendar event**; Google instead emails the invitee.
+  No event → the poller is structurally blind → the scheduler has nothing to
+  dispatch. This is not a bug in the poller; it's a missing **second** detection
+  path.
+- **Solution:** A **Gmail invite scanner** — a third background loop that reads
+  the bot's inbox (`gmail.readonly`) for Meet-invite emails and upserts a
+  `meetings` row keyed on `gmail_message_id` (partial unique index, so the many
+  Calendar-sourced rows with `NULL` never collide). The scheduler is unchanged:
+  instant meets get `start_time = now`, which already lands inside `_claim_due`'s
+  window, so the next tick dispatches the bot.
+- **The discovery that real testing caught (and unit tests didn't):** A live read
+  of the inbox showed the first-draft query `"meet.google.com"` also matched
+  **calendar invitations** (sent by the organizer) — meetings the poller
+  *already* tracks. Inserting those would create a **second** row for one
+  meeting → **two bots in one room → a duplicate insight email.** 72 green unit
+  tests said nothing; one real API call exposed it.
+- **The dedup fix (two guards):**
+  1. **Sharpen the query** to `from:meetings-noreply@google.com` — Google Meet's
+     instant-invite sender. Calendar invitations come from the organizer, so they
+     fall out. Verified live: the query then matched **only** the no-Calendar-event
+     instant meet and dropped both calendar invites.
+  2. **Cross-source `native_meeting_id` guard** in the scanner: skip any invite
+     whose Meet code already has a **non-terminal** meeting row (poller, manual,
+     or a prior scan), plus in-batch dedup for two invite emails of one meeting. A
+     live Meet room can't host two concurrent sessions, so a same-code meeting in
+     flight *is* this meeting.
+- **Ships OFF by design:** the bot's refresh token had only `gmail.send`;
+  `gmail.readonly` is a **separate scope that cannot be added in code** — it needs
+  an OAuth re-consent. So the feature is gated behind `GMAIL_SCAN_ENABLED=false`
+  and shipped inert; the token is re-minted (superset of all scopes) and the flag
+  flipped as a deliberate rollout step.
+- **Verified, not assumed:** after re-consent, a live read using the scanner's own
+  reader path returned the exact missed meeting (`dwz-mvzb-esz`, parsed to its
+  Meet code) with **no 403** — proving the scope works end to end — and the
+  sharpened query isolated it from the calendar invites. 74 unit tests pass.
+
+> **Lesson:** when a feature reads from a real external source, a green unit suite
+> is necessary but **not sufficient** — mocks encode your assumptions, so they
+> can't surface the ones you got wrong. The duplicate-dispatch path was invisible
+> until a single real `list_message_ids` call showed the inbox contained email
+> shapes the design hadn't accounted for. Test against the real source **before**
+> shipping, not after a user reports it. Second lesson: **one detector is a single
+> point of blindness.** Calendar-only detection silently dropped an entire class
+> of meetings (those born on meet.google.com); the fix was a second, independent
+> path — with explicit cross-path dedup so the two never collide.
+
 ---
 
 ## 6. Deployment (Railway)
