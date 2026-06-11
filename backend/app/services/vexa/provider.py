@@ -38,6 +38,22 @@ class TranscriptResult:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class ChatMessage:
+    """A single Meet chat message captured by the bot.
+
+    ``timestamp`` is kept as the provider's raw value stringified (lossless)
+    rather than parsed into a datetime, because it doubles as part of the
+    idempotency key for chat capture.
+    """
+
+    sender: str
+    text: str
+    timestamp: str | None = None
+    is_from_bot: bool = False
+    raw: dict = field(default_factory=dict)
+
+
 class ProviderError(RuntimeError):
     """Raised when the provider returns an unexpected/error response."""
 
@@ -71,3 +87,21 @@ class BotProvider(ABC):
     @abstractmethod
     async def stop(self, native_meeting_id: str, *, platform: str = "google_meet") -> bool:
         ...
+
+    # --- Phase 2: interactive copilot chat I/O ---
+
+    @abstractmethod
+    async def get_chat(
+        self, native_meeting_id: str, *, platform: str = "google_meet"
+    ) -> list[ChatMessage]:
+        """Return chat messages captured from the meeting (polling fallback)."""
+
+    @abstractmethod
+    async def send_chat(
+        self, native_meeting_id: str, text: str, *, platform: str = "google_meet"
+    ) -> bool:
+        """Post a message into the meeting chat as the bot. True on success."""
+
+    @abstractmethod
+    async def set_webhook(self, webhook_url: str, webhook_secret: str) -> bool:
+        """Register the account-level webhook (meeting.completed et al.)."""

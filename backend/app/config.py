@@ -114,10 +114,16 @@ class Settings(BaseSettings):
     # The bot's visible display name in the Meet roster + chat. Must align with a
     # trigger so participants can discover how to summon it ("@CentralAgent ...").
     copilot_bot_name: str = Field(default="CentralAgent", alias="COPILOT_BOT_NAME")
-    # Vexa real-time WebSocket (PRIMARY live channel for chat.received +
-    # transcript.mutable). Polling is the documented fallback only.
+    # Vexa real-time WebSocket URL (chat.received + transcript.mutable).
     vexa_ws_url: str = Field(default="wss://api.cloud.vexa.ai/ws", alias="VEXA_WS_URL")
-    # Fallback chat-poll cadence used only when the WS is unavailable/disconnected.
+    # Live channel for chat capture: "ws" (push, lower latency) or "poll" (REST
+    # GET /chat). Default "poll" — it is the documented, verified-reliable path;
+    # "ws" is preferred once the live envelope has been validated against a real
+    # meeting (then the poller is the fallback). The two never run together for
+    # the same meeting.
+    copilot_live_channel: str = Field(default="poll", alias="COPILOT_LIVE_CHANNEL")
+    # Chat-poll cadence (primary cadence in "poll" mode; fallback cadence in "ws"
+    # mode when the socket is down).
     copilot_chat_poll_interval_seconds: int = Field(
         default=8, ge=2, le=120, alias="COPILOT_CHAT_POLL_INTERVAL_SECONDS"
     )
