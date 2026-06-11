@@ -17,6 +17,7 @@ from app.services.vexa.provider import (
     BotDispatchResult,
     BotProvider,
     BotStatusResult,
+    ChatMessage,
     ProviderError,
     TranscriptResult,
 )
@@ -129,6 +130,61 @@ class CloudVexaProvider(BotProvider):
         log.info("vexa_stop", native_meeting_id=native_meeting_id, status=resp.status_code, ok=ok)
         return ok
 
+    # --- Phase 2: interactive copilot chat I/O ---
+
+    async def get_chat(
+        self, native_meeting_id: str, *, platform: str = "google_meet"
+    ) -> list[ChatMessage]:
+        url = f"{self._base}/bots/{platform}/{native_meeting_id}/chat"
+        resp = await request_with_retries("GET", url, headers=self._headers(), timeout=_TIMEOUT)
+        # 404 = bot not in a meeting yet / no chat surface: treat as "no messages"
+        # rather than an error so the poll loop stays quiet before the bot joins.
+        if resp.status_code == 404:
+            return []
+        if resp.status_code != 200:
+            log.error("vexa_get_chat_failed", status=resp.status_code, body=resp.text[:300])
+            raise ProviderError("vexa get_chat failed", status_code=resp.status_code, body=resp.text)
+        data = resp.json()
+        raw_messages = _extract_chat_messages(data)
+        messages = [_parse_chat_message(m) for m in raw_messages if isinstance(m, dict)]
+        log.info("vexa_get_chat_ok", native_meeting_id=native_meeting_id, messages=len(messages))
+        return messages
+
+    async def send_chat(
+        self, native_meeting_id: str, text: str, *, platform: str = "google_meet"
+    ) -> bool:
+        url = f"{self._base}/bots/{platform}/{native_meeting_id}/chat"
+        resp = await request_with_retries(
+            "POST", url, headers=self._headers(), json={"text": text}, timeout=_TIMEOUT
+        )
+        ok = resp.status_code in (200, 201, 202)
+        if ok:
+            log.info("vexa_send_chat_ok", native_meeting_id=native_meeting_id, chars=len(text))
+        else:
+            log.error(
+                "vexa_send_chat_failed",
+                native_meeting_id=native_meeting_id,
+                status=resp.status_code,
+                body=resp.text[:300],
+            )
+        return ok
+
+    async def set_webhook(self, webhook_url: str, webhook_secret: str) -> bool:
+        url = f"{self._base}/user/webhook"
+        resp = await request_with_retries(
+            "PUT",
+            url,
+            headers=self._headers(),
+            json={"webhook_url": webhook_url, "webhook_secret": webhook_secret},
+            timeout=_TIMEOUT,
+        )
+        ok = resp.status_code in (200, 201, 204)
+        if ok:
+            log.info("vexa_set_webhook_ok", webhook_url=webhook_url)
+        else:
+            log.error("vexa_set_webhook_failed", status=resp.status_code, body=resp.text[:300])
+        return ok
+
 
 def _extract_segments(data: dict) -> list:
     """Vexa transcript payloads vary slightly; normalise to a list of segments."""
@@ -152,3 +208,26 @@ def _segments_to_text(segments: list) -> str:
             continue
         lines.append(f"{speaker}: {text}".strip(" :") if speaker else text)
     return "\n".join(lines)
+
+
+def _extract_chat_messages(data: dict | list) -> list:
+    """Normalise a /chat payload to a list of message dicts (shape varies)."""
+    if isinstance(data, dict):
+        for key in ("messages", "chat", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _parse_chat_message(m: dict) -> ChatMessage:
+    """Map a raw Vexa chat dict to a ChatMessage (defensive on field names)."""
+    ts = m.get("timestamp", m.get("time"))
+    return ChatMessage(
+        sender=str(m.get("sender") or m.get("speaker") or m.get("from") or "").strip(),
+        text=str(m.get("text") or m.get("content") or m.get("message") or ""),
+        timestamp=None if ts is None else str(ts),
+        is_from_bot=bool(m.get("is_from_bot") or m.get("from_bot") or False),
+        raw=m,
+    )

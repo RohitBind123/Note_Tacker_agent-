@@ -93,6 +93,77 @@ class Settings(BaseSettings):
         default="https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_API_BASE",
     )
+    # Embedding model for the copilot retrieval layer (RAG over transcript chunks).
+    gemini_embed_model: str = Field(
+        default="gemini-embedding-001", alias="GEMINI_EMBED_MODEL"
+    )
+    # Output dimensionality for embeddings. 768 keeps us under pgvector's 2000-dim
+    # HNSW index limit; NOT pre-normalised by Gemini at <3072, so we L2-normalise
+    # ourselves before storing/comparing (cosine). Changing this requires a
+    # migration (the vector column dimension is fixed) + a re-embed backfill.
+    embed_dimensions: int = Field(default=768, ge=128, le=3072, alias="EMBED_DIMENSIONS")
+
+    # --- Phase 2: Interactive Meeting Copilot ---
+    # Master switch. OFF by default so the copilot ships dark and is enabled per
+    # environment once a live meeting has validated the WS + chat round-trip.
+    copilot_enabled: bool = Field(default=False, alias="COPILOT_ENABLED")
+    # Comma-separated mention triggers. A chat message is routed to the copilot
+    # only if its text contains one of these (case-insensitive). Parsed via
+    # the ``copilot_triggers`` property below.
+    copilot_triggers_raw: str = Field(default="@centralagent", alias="COPILOT_TRIGGERS")
+    # The bot's visible display name in the Meet roster + chat. Must align with a
+    # trigger so participants can discover how to summon it ("@CentralAgent ...").
+    copilot_bot_name: str = Field(default="CentralAgent", alias="COPILOT_BOT_NAME")
+    # Vexa real-time WebSocket URL (chat.received + transcript.mutable).
+    vexa_ws_url: str = Field(default="wss://api.cloud.vexa.ai/ws", alias="VEXA_WS_URL")
+    # Live channel for chat capture: "ws" (push, lower latency) or "poll" (REST
+    # GET /chat). Default "poll" — it is the documented, verified-reliable path;
+    # "ws" is preferred once the live envelope has been validated against a real
+    # meeting (then the poller is the fallback). The two never run together for
+    # the same meeting.
+    copilot_live_channel: str = Field(default="poll", alias="COPILOT_LIVE_CHANNEL")
+    # Chat-poll cadence (primary cadence in "poll" mode; fallback cadence in "ws"
+    # mode when the socket is down). 4s keeps the bot feeling responsive — it is
+    # the dominant component of the perceived "@mention -> reply" latency.
+    copilot_chat_poll_interval_seconds: int = Field(
+        default=4, ge=2, le=120, alias="COPILOT_CHAT_POLL_INTERVAL_SECONDS"
+    )
+    # How often the rolling meeting-memory (decisions/action items/risks/open
+    # questions) is rebuilt from the growing transcript during a live meeting.
+    copilot_memory_refresh_seconds: int = Field(
+        default=60, ge=15, le=600, alias="COPILOT_MEMORY_REFRESH_SECONDS"
+    )
+    # Number of transcript chunks retrieved (top-K by cosine similarity) to ground
+    # a copilot answer.
+    copilot_context_top_k: int = Field(default=6, ge=1, le=50, alias="COPILOT_CONTEXT_TOP_K")
+    # Shared secret for verifying inbound Vexa webhook HMAC signatures. Empty ->
+    # the webhook endpoint rejects all calls (fail closed).
+    vexa_webhook_secret: str = Field(default="", alias="VEXA_WEBHOOK_SECRET")
+    # Responsiveness: optionally post an instant acknowledgement to the meeting chat
+    # the moment an @mention is claimed, before the (retrieval + LLM) answer.
+    # DEFAULT OFF: Meet chat is append-only (no edit/delete API), so the placeholder
+    # cannot be replaced by the answer the way ChatGPT/Perplexity do -- it lingers as a
+    # permanent separate line above every reply. Since answers land in ~3s, that stale
+    # line is clutter, not feedback. Kept behind a flag so it can be re-enabled via env
+    # if a future platform supports message replacement. Best-effort: a failed ack never
+    # blocks the answer.
+    copilot_thinking_ack_enabled: bool = Field(
+        default=False, alias="COPILOT_THINKING_ACK_ENABLED"
+    )
+    # The placeholder text. Kept emoji-free in code; override via env to add one
+    # (e.g. COPILOT_THINKING_ACK_TEXT="CentralAgent is thinking...").
+    copilot_thinking_ack_text: str = Field(
+        default="CentralAgent is thinking...", alias="COPILOT_THINKING_ACK_TEXT"
+    )
+
+    @property
+    def copilot_triggers(self) -> list[str]:
+        """Normalised (lowercased, stripped, non-empty) mention triggers."""
+        return [
+            token.strip().lower()
+            for token in self.copilot_triggers_raw.split(",")
+            if token.strip()
+        ]
 
     # --- Google (Calendar read + Gmail send) ---
     gcp_project_id: str = Field(default="", alias="GCP_PROJECT_ID")

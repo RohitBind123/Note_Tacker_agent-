@@ -13,7 +13,9 @@ from app.config import settings
 from app.db.session import async_session_factory
 from app.logging_config import get_logger
 from app.services import calendar_poller, gmail_scanner, scheduler
+from app.services.copilot import live as copilot_live
 from app.services.google import calendar_watch
+from app.services.vexa.factory import get_provider
 
 log = get_logger(__name__)
 
@@ -36,6 +38,31 @@ async def _maybe_register_calendar_push() -> None:
         _watch_channel = await calendar_watch.register_watch()
     except Exception:
         log.exception("calendar_push_register_failed")
+
+
+async def _register_vexa_webhook() -> None:
+    """Register the account-level Vexa webhook so meeting.completed lands on us.
+
+    Requires the copilot to be enabled, an HTTPS public base URL (Vexa won't
+    deliver to plain http / it's used to sign back), and a configured secret.
+    No-op otherwise — the scheduler's process_pending pass remains the
+    always-on fallback for finalizing meetings, so a missing webhook only costs
+    latency, never correctness.
+    """
+    if not settings.copilot_enabled:
+        return
+    if not settings.public_base_url.startswith("https://"):
+        log.warning("vexa_webhook_skipped", reason="PUBLIC_BASE_URL is not https")
+        return
+    if not settings.vexa_webhook_secret:
+        log.warning("vexa_webhook_skipped", reason="VEXA_WEBHOOK_SECRET is not set")
+        return
+    webhook_url = f"{settings.public_base_url.rstrip('/')}/webhooks/vexa"
+    try:
+        ok = await get_provider().set_webhook(webhook_url, settings.vexa_webhook_secret)
+        log.info("vexa_webhook_registered", webhook_url=webhook_url, ok=ok)
+    except Exception:
+        log.exception("vexa_webhook_register_failed")
 
 
 async def _poll_calendar_once() -> None:
@@ -87,14 +114,37 @@ def start() -> None:
                 _loop("gmail_scanner", settings.gmail_scan_interval_seconds, _scan_gmail_once)
             )
         )
+    # Phase 2 copilot loops — only when enabled. Chat capture + retrieval indexing
+    # run on the fast cadence; the paid memory rebuild on the slow one.
+    if settings.copilot_enabled:
+        _tasks.append(
+            asyncio.create_task(
+                _loop(
+                    "copilot_chat",
+                    settings.copilot_chat_poll_interval_seconds,
+                    copilot_live.copilot_chat_tick,
+                )
+            )
+        )
+        _tasks.append(
+            asyncio.create_task(
+                _loop(
+                    "copilot_memory",
+                    settings.copilot_memory_refresh_seconds,
+                    copilot_live.copilot_memory_tick,
+                )
+            )
+        )
+        _tasks.append(asyncio.create_task(_register_vexa_webhook()))
     # Calendar push registration (prod only); poller above is the always-on fallback.
     _tasks.append(asyncio.create_task(_maybe_register_calendar_push()))
-    active_loops = 3 if settings.gmail_scan_enabled else 2
+    active_loops = 2 + (1 if settings.gmail_scan_enabled else 0) + (2 if settings.copilot_enabled else 0)
     log.info(
         "background_runner_started",
         loops=active_loops,
         push_enabled=settings.calendar_push_enabled,
         gmail_scan_enabled=settings.gmail_scan_enabled,
+        copilot_enabled=settings.copilot_enabled,
     )
 
 

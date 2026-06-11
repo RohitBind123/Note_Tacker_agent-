@@ -22,6 +22,7 @@ invite to meetings. Behind that assistant, a few helpers do the actual work:
 | **The Notebook** (database) | A notebook where every meeting is written down | Remembers each meeting and what stage it's at |
 | **The Planner** (scheduler) | A helper who checks the clock every 30 seconds | Sends the bot in at the right time, cleans up after |
 | **The Bot** (Vexa) | The thing that actually sits in the Google Meet | Joins the call, listens, writes down who said what |
+| **The Copilot** (Gemini AI, live) | A helper reading the meeting chat as it happens | Watches for `@centralagent` questions and answers them in the chat, mid-meeting |
 | **The Summarizer** (Gemini AI) | A smart reader | Turns the raw transcript into a tidy summary |
 | **The Mailer** (Gmail) | The post office | Emails the summary to whoever organized the meeting |
 
@@ -254,6 +255,99 @@ writes down who said what.**
 
 ---
 
+### Step 4½ — Asking the bot questions *during* the meeting (the live Copilot)
+
+While the Bot is sitting in the call, anyone can **ask it a question in the Google
+Meet chat** and get an answer back, right there, mid-meeting. You don't address a
+person — you address the bot by name. Type:
+
+```
+@centralagent what did we just decide about the launch date?
+```
+
+…and a few seconds later a reply appears in the same chat:
+
+```
+CentralAgent: The team agreed to push the launch to March 15 so QA has a full
+week. Priya owns confirming the new date with marketing.
+```
+
+The trick: the answer is built **only from what was actually said in this meeting**
+— the bot never makes things up. Here's the whole loop in plain words.
+
+```
+   YOU type in the Meet chat:  "@centralagent what did we decide?"
+                 │
+                 │   every 4 seconds the Copilot READS the chat (just like the
+                 │   Watcher reads the calendar — it asks, on a timer)
+                 ▼
+   ┌────────────────────────────────────────────────┐
+   │  THE COPILOT notices a line starting with        │
+   │  "@centralagent" -> "this one's for me"          │
+   │                                                  │
+   │  Step A: write the question into the Notebook    │
+   │          (so the same question is never          │
+   │           answered twice, even if read again)    │
+   │                                                  │
+   │  Step B: find the most relevant bits of the      │
+   │          transcript -- the handful of moments    │
+   │          that best match the question            │
+   │                                                  │
+   │  Step C: hand those bits + a running "meeting    │
+   │          memory" to Gemini and say: answer       │
+   │          USING ONLY THIS. If it's not here,      │
+   │          say you don't know.                     │
+   └───────────────────────┬──────────────────────────┘
+                           │  the answer (a few sentences)
+                           ▼
+              THE COPILOT posts it back into the Meet chat
+                           │
+                           ▼
+            Everyone in the call sees "CentralAgent: ..."
+```
+
+> **Under the hood, simply:**
+> - **"Finding the most relevant bits" (Step B)** is the clever part. As the
+>   meeting goes, the Copilot quietly chops the transcript into small pieces and
+>   gives each piece a kind of *meaning-fingerprint* (a list of numbers that
+>   captures what it's about — the technical word is an **embedding**). Your
+>   question gets the same fingerprint treatment, and the Copilot picks the handful
+>   of pieces whose fingerprints are closest to the question's. That's how it
+>   answers *"what did we decide?"* by pulling the exact moments where a decision
+>   was made — instead of re-reading the entire meeting every time.
+> - **The "meeting memory"** is a short, always-up-to-date crib sheet the Copilot
+>   keeps in the Notebook: the running summary, decisions so far, action items,
+>   open questions. It's refreshed about once a minute, and *only* when enough new
+>   talking has happened to be worth it (so we're not paying the AI to re-summarize
+>   the same words). This gives every answer the big-picture context, not just the
+>   few matching snippets.
+> - **Never answered twice:** the moment the Copilot claims a question, it writes
+>   it into the Notebook with a one-of-a-kind marker. If its every-4-seconds read
+>   happens to see the same chat line again, the Notebook says "already handled" and
+>   it's skipped. (Same idea as the Watcher not adding the same meeting twice.)
+> - **Why `@centralagent` and not just any message?** Otherwise the bot would try
+>   to answer every sentence of normal human conversation. The name is the
+>   "this is for you" signal — exactly like saying "Hey Siri" before a question.
+> - **It's grounded, on purpose.** The instruction to Gemini is strict: *answer
+>   using only the meeting's own words; if the answer isn't in there, say so.* A
+>   copilot that confidently invents a decision nobody made is worse than one that
+>   admits it didn't catch something.
+
+> **One honest limitation (why there's no "thinking…" bubble):** in apps like
+> ChatGPT you see a "thinking…" shimmer that gets *replaced* by the answer. Google
+> Meet chat doesn't allow that — once a line is posted, it can never be edited or
+> removed. So a "thinking…" line would just sit there forever above every real
+> answer, as clutter. Since answers land in about three seconds anyway, we leave it
+> off. (The switch still exists in the settings in case a future chat platform ever
+> allows replacing a message.)
+
+This whole Copilot runs **in parallel** with everything else — the Planner is still
+watching the clock, the Bot is still transcribing. It's a fourth and fifth helper
+(one reads the chat every 4 seconds, one refreshes the memory every minute) that
+only wake up while a meeting is live.
+
+---
+
 ### Step 5 — The meeting ends
 
 Priya wraps up at 10:30 and leaves. The Bot needs to leave too — and it does,
@@ -309,6 +403,17 @@ meeting and does three quick things:
 > - The email is sent as the bot account using Google's mail service. Once it's
 >   sent, and only then, the meeting is officially **"completed."**
 
+> **A faster finish (the instant nudge):** there are now **two** ways the "make the
+> summary" step gets kicked off, and whichever happens first wins. (1) The Planner's
+> every-20-seconds check notices the meeting ended — the steady fallback. (2) The
+> Bot's service **pings us the instant** recording is finalized (a *webhook* — the
+> "ping me" method mentioned earlier, which works here because the ping goes to a
+> fixed address the Bot's service already knows). In a real test the ping arrived and
+> the summary was emailed about **8 seconds** after the meeting ended. Both paths run
+> the *same* summary-and-email work, and a lock makes sure they can't both send — so
+> even though the Bot's service pinged us **four times**, exactly **one** email went
+> out.
+
 ---
 
 ## The meeting's journey, as a simple status ladder
@@ -338,6 +443,8 @@ so we always know exactly where it stopped.
 
 - **In your calendar:** the bot shows as **"Yes"** to the invite (it RSVP'd itself).
 - **During the meeting:** one **"Admit"** prompt — click it once.
+- **During the meeting (optional):** type **`@centralagent <your question>`** in the
+  Meet chat and get an answer back in a few seconds, drawn from what's been said.
 - **A minute or so after the meeting:** an email titled **"Meeting Insights —
   Project Sync"** with the summary, action items, and so on.
 - **Behind the scenes (logs):** a clean trail like
@@ -362,6 +469,8 @@ so we always know exactly where it stopped.
 
 ### Want more depth on any piece?
 - The exact diagrams, timings, and components → [ARCHITECTURE.md](./ARCHITECTURE.md)
+- The live Copilot in technical detail (retrieval, memory, idempotency) →
+  [ARCHITECTURE.md](./ARCHITECTURE.md) §4b
 - Every problem we hit and how we fixed it → [CHALLENGES.md](./CHALLENGES.md)
 - The buttons/commands to run it → [DEPLOY.md](./DEPLOY.md)
 - How the bot will one day skip even the "Admit" click → [ZERO_CLICK_AUTO_ADMIT.md](./ZERO_CLICK_AUTO_ADMIT.md)

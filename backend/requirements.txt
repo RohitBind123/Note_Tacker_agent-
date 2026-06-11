@@ -10,9 +10,15 @@ pydantic-settings==2.7.1
 SQLAlchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
+# pgvector: vector(768) column type for the Phase 2 copilot retrieval layer
+# (RAG over transcript chunks). Pulls numpy as a transitive dependency.
+pgvector==0.4.2
 
 # --- HTTP / external APIs ---
 httpx==0.28.1
+# websockets: Vexa real-time channel (chat.received + transcript.mutable) for
+# the live meeting copilot. Polling REST is the documented fallback only.
+websockets==16.0
 
 # --- Google APIs (Calendar read + Gmail send) ---
 google-auth==2.37.0
