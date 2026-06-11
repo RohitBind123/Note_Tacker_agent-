@@ -64,6 +64,28 @@ async def _claim_interaction(
     return result.scalar_one_or_none()
 
 
+async def _send_thinking_ack(provider: BotProvider, meeting: Meeting) -> bool:
+    """Post an instant 'thinking' placeholder to chat (best-effort).
+
+    Fired once per claimed mention, before the slow retrieval + LLM step, so the
+    asker sees the bot react immediately instead of ~10s of silence. Meet chat has
+    no edit API, so this is a separate line, not an in-place animation. Any failure
+    is swallowed: the acknowledgement must never block or fail the real answer.
+    """
+    if not settings.copilot_thinking_ack_enabled:
+        return False
+    try:
+        await provider.send_chat(
+            meeting.native_meeting_id,
+            settings.copilot_thinking_ack_text,
+            platform=meeting.platform,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - best-effort; never propagate
+        log.warning("copilot_thinking_ack_failed", error=str(exc))
+        return False
+
+
 async def _finalize(
     db: AsyncSession,
     interaction_id: int,
@@ -162,6 +184,12 @@ async def handle_mention(
         await _finalize(db, interaction_id, status=CopilotInteractionStatus.SKIPPED)
         log.info("copilot_mention_empty_skipped", interaction_id=interaction_id)
         return interaction_id
+
+    # Instant feedback: acknowledge in chat before the slow generation step. The
+    # claim above guarantees this fires exactly once per mention.
+    acked = await _send_thinking_ack(provider, meeting)
+    if acked:
+        log.info("copilot_thinking_ack_sent", interaction_id=interaction_id)
 
     engine = engine or CopilotEngine()
     top_k = top_k or settings.copilot_context_top_k

@@ -123,9 +123,10 @@ class Settings(BaseSettings):
     # the same meeting.
     copilot_live_channel: str = Field(default="poll", alias="COPILOT_LIVE_CHANNEL")
     # Chat-poll cadence (primary cadence in "poll" mode; fallback cadence in "ws"
-    # mode when the socket is down).
+    # mode when the socket is down). 4s keeps the bot feeling responsive — it is
+    # the dominant component of the perceived "@mention -> reply" latency.
     copilot_chat_poll_interval_seconds: int = Field(
-        default=8, ge=2, le=120, alias="COPILOT_CHAT_POLL_INTERVAL_SECONDS"
+        default=4, ge=2, le=120, alias="COPILOT_CHAT_POLL_INTERVAL_SECONDS"
     )
     # How often the rolling meeting-memory (decisions/action items/risks/open
     # questions) is rebuilt from the growing transcript during a live meeting.
@@ -138,6 +139,18 @@ class Settings(BaseSettings):
     # Shared secret for verifying inbound Vexa webhook HMAC signatures. Empty ->
     # the webhook endpoint rejects all calls (fail closed).
     vexa_webhook_secret: str = Field(default="", alias="VEXA_WEBHOOK_SECRET")
+    # Responsiveness: post an instant acknowledgement to the meeting chat the moment
+    # an @mention is claimed, before the (retrieval + LLM) answer is generated. Meet
+    # chat has no message-edit API, so this is a separate placeholder line rather than
+    # an in-place "typing" animation. Best-effort: a failed ack never blocks the answer.
+    copilot_thinking_ack_enabled: bool = Field(
+        default=True, alias="COPILOT_THINKING_ACK_ENABLED"
+    )
+    # The placeholder text. Kept emoji-free in code; override via env to add one
+    # (e.g. COPILOT_THINKING_ACK_TEXT="CentralAgent is thinking...").
+    copilot_thinking_ack_text: str = Field(
+        default="CentralAgent is thinking...", alias="COPILOT_THINKING_ACK_TEXT"
+    )
 
     @property
     def copilot_triggers(self) -> list[str]:
