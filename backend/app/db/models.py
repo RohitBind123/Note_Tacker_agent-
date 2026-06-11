@@ -59,8 +59,13 @@ class Meeting(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
 
-    # Idempotency key from Google Calendar (null for manually dispatched meetings).
+    # Idempotency key from Google Calendar (null for Gmail-sourced / manual meetings).
     google_event_id: Mapped[str | None] = mapped_column(String(256), unique=True, index=True)
+
+    # Idempotency key for Gmail-sourced meetings (null for Calendar-sourced ones).
+    # Uniqueness is enforced via a partial index (WHERE gmail_message_id IS NOT NULL)
+    # so the many NULL rows from Calendar-sourced meetings never collide.
+    gmail_message_id: Mapped[str | None] = mapped_column(String(256))
 
     platform: Mapped[str] = mapped_column(String(32), default="google_meet", nullable=False)
     # The "abc-defg-hij" portion of the Meet URL (Vexa's native_meeting_id).

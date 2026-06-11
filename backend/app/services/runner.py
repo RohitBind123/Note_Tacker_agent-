@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from app.config import settings
 from app.db.session import async_session_factory
 from app.logging_config import get_logger
-from app.services import calendar_poller, scheduler
+from app.services import calendar_poller, gmail_scanner, scheduler
 from app.services.google import calendar_watch
 
 log = get_logger(__name__)
@@ -41,6 +41,11 @@ async def _maybe_register_calendar_push() -> None:
 async def _poll_calendar_once() -> None:
     async with async_session_factory() as db:
         await calendar_poller.poll_once(db)
+
+
+async def _scan_gmail_once() -> None:
+    async with async_session_factory() as db:
+        await gmail_scanner.scan_once(db)
 
 
 async def _loop(name: str, interval: int, fn: Callable[[], Awaitable[None]]) -> None:
@@ -75,9 +80,22 @@ def start() -> None:
             _loop("scheduler", settings.scheduler_interval_seconds, scheduler.tick)
         )
     )
+    # Gmail invite scanner — optional third loop (off until gmail.readonly is granted).
+    if settings.gmail_scan_enabled:
+        _tasks.append(
+            asyncio.create_task(
+                _loop("gmail_scanner", settings.gmail_scan_interval_seconds, _scan_gmail_once)
+            )
+        )
     # Calendar push registration (prod only); poller above is the always-on fallback.
     _tasks.append(asyncio.create_task(_maybe_register_calendar_push()))
-    log.info("background_runner_started", loops=2, push_enabled=settings.calendar_push_enabled)
+    active_loops = 3 if settings.gmail_scan_enabled else 2
+    log.info(
+        "background_runner_started",
+        loops=active_loops,
+        push_enabled=settings.calendar_push_enabled,
+        gmail_scan_enabled=settings.gmail_scan_enabled,
+    )
 
 
 async def stop() -> None:

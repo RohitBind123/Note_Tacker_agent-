@@ -95,6 +95,29 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str = Field(default="", alias="GOOGLE_OAUTH_CLIENT_SECRET")
     google_oauth_refresh_token: str = Field(default="", alias="GOOGLE_OAUTH_REFRESH_TOKEN")
 
+    # --- Gmail invite scanner ---
+    # Reads the bot's Gmail inbox for Meet invite emails sent via "Add people"
+    # in meet.google.com (which creates no Calendar event, so the calendar poller
+    # misses them). Default OFF: requires gmail.readonly to be added to the refresh
+    # token's OAuth scope before enabling (see docs/CHALLENGES.md).
+    gmail_scan_enabled: bool = Field(default=False, alias="GMAIL_SCAN_ENABLED")
+    gmail_scan_interval_seconds: int = Field(default=90, alias="GMAIL_SCAN_INTERVAL_SECONDS")
+    # ge=1 prevents maxResults=0 which the Gmail API rejects with HTTP 400.
+    gmail_scan_max_results: int = Field(default=25, ge=1, le=500, alias="GMAIL_SCAN_MAX_RESULTS")
+    # Tune the Gmail search query without a deploy.
+    # Scoped to meetings-noreply@google.com — the sender Google Meet uses for
+    # "Add people" / instant-meeting invites, which create NO Calendar event (so
+    # the calendar poller is blind to them). Calendar invitations come from the
+    # organizer instead, so they are intentionally excluded here to avoid the
+    # scanner creating a duplicate row for a meeting the poller already handles.
+    # ROLLOUT NOTE: on first enable, widen to newer_than:7d so invites received
+    # before the feature was turned on are not missed. Restore to newer_than:1d
+    # after the first successful scan cycle.
+    gmail_scan_query: str = Field(
+        default='from:meetings-noreply@google.com "meet.google.com" newer_than:1d',
+        alias="GMAIL_SCAN_QUERY",
+    )
+
     # --- Webhooks / public URL ---
     public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
     # Calendar push (events.watch). Requires a VERIFIED-domain HTTPS public_base_url;
