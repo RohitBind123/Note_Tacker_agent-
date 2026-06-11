@@ -88,3 +88,85 @@
 - Calendar detection = polling (push needs domain-verified webhook; ngrok can't verify).
 - Gemini model `gemini-2.5-flash` via config/env (never hardcoded).
 - Internal read-only status API for debugging; Gmail is the only user-facing delivery.
+
+---
+
+# PHASE 2 — Interactive Meeting Copilot
+
+Branch: `feat/phase2-meeting-copilot` (off `feat/route-insight-to-real-inviter`).
+Base the PR on `main` once PR #5 (inviter routing) merges, so the diff is clean.
+
+## Decisions (locked with user 2026-06-11)
+- Scope: FULL Phase 2 in one build (chat loop + evolving memory + decisions/action-items + vector retrieval).
+- Engine: standard Gemini `generateContent` (gemini-2.5-flash) + a retrieval (RAG) layer. No Live API (Phase 3 "speak").
+- Webhooks: YES — register `PUT /user/webhook`; finalize on `meeting.completed` (also fixes the Phase-1 ~20s end lag).
+- Trigger: `@centralagent` exact, case-insensitive (env-overridable `COPILOT_TRIGGERS`).
+
+## Validated foundation (real evidence: live Vexa OpenAPI + Vexa source + Gemini docs)
+- READ chat:  `GET  /bots/{platform}/{native_id}/chat` -> `{messages:[{sender,text,timestamp,is_from_bot}]}`
+- SEND chat:  `POST /bots/{platform}/{native_id}/chat` body `{text}`
+- WebSocket (PRIMARY live channel): `wss://api.cloud.vexa.ai/ws` header `X-API-Key`;
+  subscribe `{"action":"subscribe","meetings":[{"platform":"google_meet","native_id":"..."}]}`;
+  pushes `chat.received {sender,text,timestamp}` + `transcript.mutable` segments. Poll = fallback.
+- Webhook: enveloped POST `{event_id,event_type,api_version,created_at,data:{meeting}}`;
+  `meeting.completed` default-on; verify `X-Webhook-Signature: sha256=HMAC(secret, f"{ts}."+body)`,
+  `X-Webhook-Timestamp` replay guard; dedup on `event_id`.
+- Embeddings: `gemini-embedding-001`, `outputDimensionality=768`, taskType RETRIEVAL_DOCUMENT/QUERY,
+  L2-normalize ourselves (768 not pre-normalized). pgvector `vector(768)` + HNSW cosine.
+- Caveat: free Vexa key expires ~1h -> sustained live testing needs a fresh/paid key.
+
+## Architecture (push-first, poll-fallback — matches SSE-before-polling rule)
+```
+Vexa WS --chat.received--> mention router --@centralagent?--> copilot engine --> POST /chat (reply)
+        \--transcript.mutable--> rolling memory builder (Gemini extract) + chunker -> embed -> pgvector
+Vexa webhook --meeting.completed--> /webhooks/vexa -> instant finalize (Phase-1 latency fix)
+copilot engine context = retrieval(pgvector) + recent chat + meeting memory + metadata
+```
+
+## Batches (TDD; pytest green + commit between each)
+
+### Batch 0 — Config + flags + bot identity
+- [ ] config.py: COPILOT_ENABLED, COPILOT_TRIGGERS(csv, "@centralagent"), VEXA_WS_URL,
+      COPILOT_CHAT_POLL_INTERVAL_SECONDS, GEMINI_EMBED_MODEL(gemini-embedding-001), EMBED_DIMENSIONS(768),
+      VEXA_WEBHOOK_SECRET, COPILOT_MEMORY_REFRESH_SECONDS, COPILOT_CONTEXT_TOP_K.
+- [ ] Bot joins as visible name "CentralAgent" (so @centralagent is discoverable).
+- [ ] Tests: settings parse / trigger csv split.
+
+### Batch 1 — DB models + pgvector migration
+- [ ] Models: MeetingChatMessage, MeetingMemory, TranscriptChunk(embedding vector(768)), CopilotInteraction.
+- [ ] Migration: CREATE EXTENSION IF NOT EXISTS vector; tables; HNSW cosine index; idempotency unique indexes; IF NOT EXISTS; direct URL.
+- [ ] Validate additively vs real Neon; row-count audit before any constraint.
+
+### Batch 2 — Vexa client extensions
+- [ ] get_chat / send_chat / set_webhook on provider + cloud_provider.
+- [ ] WS client: connect (X-API-Key), subscribe, async-iterate, parse chat.received/transcript.mutable, reconnect.
+- [ ] Tests: httpx-mocked get/send/webhook; WS frame parse from sample JSON.
+
+### Batch 3 — Embeddings + retrieval
+- [ ] Embed client: gemini-embedding-001, 768, taskType, L2-normalize, batch endpoint.
+- [ ] Chunker (pure): segments -> overlapping chunks w/ speaker/time. Store+embed on delta; cosine top-k.
+- [ ] Tests: chunker pure; embed mocked (shape+normalize); retrieval SQL.
+
+### Batch 4 — Meeting memory builder
+- [ ] Gemini extract over new transcript -> decisions/action_items/risks/open_questions/rolling_summary; idempotent upsert; delta guard.
+- [ ] Tests: prompt build + JSON parse (Gemini mocked).
+
+### Batch 5 — Copilot Q&A engine + mention router
+- [ ] Trigger parser (pure): COPILOT_TRIGGERS case-insensitive; strip handle -> question.
+- [ ] Engine: context (retrieval + recent chat + memory + metadata) -> Gemini -> reply. Answer each mention once (CopilotInteraction dedup).
+- [ ] Intents: summarize so far / decisions / action items (mine to sender) / what did X say / did we discuss Y.
+- [ ] Tests: trigger parse table; engine mocked.
+
+### Batch 6 — Live wiring (WS manager + webhook endpoint + runner)
+- [ ] WS manager loop (gated COPILOT_ENABLED): one conn, subscribe all ACTIVE meetings, route chat->router, transcript->memory/chunker; reconnect; poll fallback.
+- [ ] POST /webhooks/vexa: verify HMAC+timestamp, dedup event_id, on meeting.completed -> finalize now. Register webhook at startup (prod https).
+- [ ] Tests: signature verify; endpoint (valid/invalid sig, replay, dup event).
+
+### Batch 7 — Real E2E
+- [ ] Live: bot joins as CentralAgent; "@centralagent summarize so far" -> reply in chat; memory populated; webhook instant finalize; retrieval "what did X say". Deploy to Railway (with confirmation).
+
+### Batch 8 — Docs + PR
+- [ ] Update README/docs; open PR (base main). No direct commits to main.
+
+## Review (filled in as batches land)
+- (pending)

@@ -93,6 +93,54 @@ class Settings(BaseSettings):
         default="https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_API_BASE",
     )
+    # Embedding model for the copilot retrieval layer (RAG over transcript chunks).
+    gemini_embed_model: str = Field(
+        default="gemini-embedding-001", alias="GEMINI_EMBED_MODEL"
+    )
+    # Output dimensionality for embeddings. 768 keeps us under pgvector's 2000-dim
+    # HNSW index limit; NOT pre-normalised by Gemini at <3072, so we L2-normalise
+    # ourselves before storing/comparing (cosine). Changing this requires a
+    # migration (the vector column dimension is fixed) + a re-embed backfill.
+    embed_dimensions: int = Field(default=768, ge=128, le=3072, alias="EMBED_DIMENSIONS")
+
+    # --- Phase 2: Interactive Meeting Copilot ---
+    # Master switch. OFF by default so the copilot ships dark and is enabled per
+    # environment once a live meeting has validated the WS + chat round-trip.
+    copilot_enabled: bool = Field(default=False, alias="COPILOT_ENABLED")
+    # Comma-separated mention triggers. A chat message is routed to the copilot
+    # only if its text contains one of these (case-insensitive). Parsed via
+    # the ``copilot_triggers`` property below.
+    copilot_triggers_raw: str = Field(default="@centralagent", alias="COPILOT_TRIGGERS")
+    # The bot's visible display name in the Meet roster + chat. Must align with a
+    # trigger so participants can discover how to summon it ("@CentralAgent ...").
+    copilot_bot_name: str = Field(default="CentralAgent", alias="COPILOT_BOT_NAME")
+    # Vexa real-time WebSocket (PRIMARY live channel for chat.received +
+    # transcript.mutable). Polling is the documented fallback only.
+    vexa_ws_url: str = Field(default="wss://api.cloud.vexa.ai/ws", alias="VEXA_WS_URL")
+    # Fallback chat-poll cadence used only when the WS is unavailable/disconnected.
+    copilot_chat_poll_interval_seconds: int = Field(
+        default=8, ge=2, le=120, alias="COPILOT_CHAT_POLL_INTERVAL_SECONDS"
+    )
+    # How often the rolling meeting-memory (decisions/action items/risks/open
+    # questions) is rebuilt from the growing transcript during a live meeting.
+    copilot_memory_refresh_seconds: int = Field(
+        default=60, ge=15, le=600, alias="COPILOT_MEMORY_REFRESH_SECONDS"
+    )
+    # Number of transcript chunks retrieved (top-K by cosine similarity) to ground
+    # a copilot answer.
+    copilot_context_top_k: int = Field(default=6, ge=1, le=50, alias="COPILOT_CONTEXT_TOP_K")
+    # Shared secret for verifying inbound Vexa webhook HMAC signatures. Empty ->
+    # the webhook endpoint rejects all calls (fail closed).
+    vexa_webhook_secret: str = Field(default="", alias="VEXA_WEBHOOK_SECRET")
+
+    @property
+    def copilot_triggers(self) -> list[str]:
+        """Normalised (lowercased, stripped, non-empty) mention triggers."""
+        return [
+            token.strip().lower()
+            for token in self.copilot_triggers_raw.split(",")
+            if token.strip()
+        ]
 
     # --- Google (Calendar read + Gmail send) ---
     gcp_project_id: str = Field(default="", alias="GCP_PROJECT_ID")

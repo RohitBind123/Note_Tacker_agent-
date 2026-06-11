@@ -148,3 +148,9 @@ class MeetingReport(Base, TimestampMixin):
     email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     meeting: Mapped[Meeting] = relationship(back_populates="report")
+
+
+# Phase 2 (interactive meeting copilot) tables live in a sibling module. Import
+# it here so any code that imports app.db.models — including Alembic's env.py —
+# registers those tables on the shared Base.metadata.
+from app.db import copilot_models  # noqa: E402,F401
