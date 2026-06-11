@@ -36,6 +36,124 @@ Everyone writes notes in the same shared **Notebook** so they stay in sync.
 
 ---
 
+## How does it know a meeting is starting? (two clocks, no webhook)
+
+A fair question: **how does the system know a meeting begins in a minute, so it
+can send the bot in?** The surprising answer: **nobody tells it.** Google never
+pings us. Instead, two helpers run on **timers** and keep *looking*, on a loop,
+forever.
+
+Picture a person with **two alarm clocks**:
+
+- **Clock A — the Watcher (every 60 seconds):** "Let me glance at the calendar and
+  copy any new meetings onto the Notebook."
+- **Clock B — the Planner (every ~20 seconds):** "Let me check the Notebook — is
+  any meeting about to start? If yes, send the bot **now**."
+
+Neither clock waits to be rung. They just look, again and again. That's the whole
+trick.
+
+> **Why not get pinged instantly?** Google *can* ping a website the moment an
+> invite arrives (called *push*), but only if that website lives on a web address
+> you've **proven you own**. We're on a temporary address Google won't let us
+> prove, so we use the two-clocks "keep looking" approach instead. It works the
+> same — at most one minute slower to notice a brand-new invite.
+
+### The two clocks, side by side
+
+| | **Clock A — the Watcher** | **Clock B — the Planner** |
+|---|---|---|
+| Looks every | 60 seconds | ~20 seconds |
+| Looks at | your Google Calendar | the Notebook (to-do list) |
+| Its job | copy new meetings into the Notebook | send the bot in at start time, then collect the transcript + email the summary |
+| Knows a meeting "starts soon"? | — | yes: grabs any meeting starting in the **next 60 seconds** |
+
+### Picture it
+
+```
+        YOUR GOOGLE CALENDAR   (where invites show up)
+                 │
+                 │   nobody pings us — the Watcher just LOOKS, on a timer
+                 ▼
+   ┌──────────────────────────────┐
+   │  CLOCK A — the WATCHER        │   looks every 60 seconds
+   │                              │
+   │   • "anything new?"           │
+   │   • says "yes" to the invite  │
+   │   • writes the meeting into   │
+   │     the Notebook              │
+   └───────────────┬──────────────┘
+                   │  writes: "Project Sync, starts 10:00, status = scheduled"
+                   ▼
+        ┌────────────────────────┐
+        │      THE NOTEBOOK      │   the shared to-do list (database)
+        │  every meeting + its   │   — survives restarts, everyone reads it
+        │  start time + status   │
+        └───────────┬────────────┘
+                   │  reads the whole list every lap
+                   ▼
+   ┌──────────────────────────────┐
+   │  CLOCK B — the PLANNER        │   looks every ~20 seconds
+   │                              │
+   │   "Any meeting starting in    │
+   │    the next 60 seconds?"      │
+   │        if YES ↓               │
+   │   send the BOT into the Meet  │
+   └───────────────┬──────────────┘
+                   │
+                   ▼
+            THE BOT joins the Google Meet
+```
+
+So **"it's starting in a minute"** is just the Planner's rule: every ~20 seconds it
+asks the Notebook *"is any meeting's start time 60 seconds away or less?"* The
+start time was copied into the Notebook by the Watcher long before — maybe minutes,
+maybe a whole day earlier — so by the time the meeting is near, the calendar isn't
+even involved. The Planner is simply a clock counting down to each meeting's start.
+
+### The whole journey on one page (invite → email)
+
+```
+[1] Someone makes a Meet event and invites centralagentai@gmail.com → Send
+                         │
+                         ▼
+[2] Google drops the invite onto the bot's own calendar
+                         │
+                         ▼
+[3] Within ≤60s the WATCHER's next look spots it:
+       • auto-says "yes"
+       • writes it to the Notebook  (status = scheduled, with the start time)
+                         │
+                         ▼
+[4] The meeting just WAITS in the Notebook. Could be minutes or hours.
+                         │
+                         ▼
+[5] ~60s before start, the PLANNER's next look grabs it:
+       scheduled → joining → tells the BOT "go join"
+       (a person clicks "Admit" once — the bot is an anonymous guest)
+                         │
+                         ▼
+[6] BOT is inside: listens + writes down who said what.   status = active
+                         │
+                         ▼
+[7] Meeting ends (host leaves / ends call / scheduled end passes).
+       Bot leaves within ~45s of being alone.            status = processing
+                         │
+                         ▼
+[8] PLANNER finishes up:
+       • grab the transcript
+       • Summarizer (Gemini) turns it into summary + decisions + action items
+         + risks + next steps
+                         │
+                         ▼
+[9] Email the summary (to the organizer, or all guests)  status = completed ✅
+```
+
+The next section walks through these exact same steps in slow motion, with the
+"under the hood" detail for each one.
+
+---
+
 ## The story: one real meeting, start to finish
 
 **The setup:** Priya schedules a Google Meet called **"Project Sync,"** sets it for

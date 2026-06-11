@@ -12,6 +12,80 @@ no human action except (today) one "Admit" click for the anonymous cloud bot.
 
 ---
 
+## 0. Mental model — two clocks, no webhook
+
+Before the detailed diagrams: the entire system is **two timer-driven loops** and
+a database between them. **Nothing is event-driven** — Google never calls us. Each
+loop wakes on its own clock, looks, acts, and goes back to sleep.
+
+| | **Clock A — `calendar_poller`** | **Clock B — `scheduler.tick`** |
+|---|---|---|
+| Wakes every | `calendar_poll_interval_seconds` = **60s** | `scheduler_interval_seconds` = **30s default / 20s in prod** |
+| Reads | Google Calendar (the bot's own) | the `meetings` table |
+| Writes | upserts meetings as `SCHEDULED` | flips lifecycle status, calls Vexa/Gemini/Gmail |
+| "Starts soon?" decision | — | claims any `SCHEDULED` whose `start_time ≤ now + dispatch_lead_seconds (60)` |
+
+```
+        GOOGLE CALENDAR  (source of truth for "what meetings exist")
+                 │
+                 │   PULL on a timer — NOT pushed (no verified domain; see §2)
+                 ▼
+   ┌──────────────────────────────┐
+   │  CLOCK A: calendar_poller     │   every 60s
+   │   • list Meet events          │
+   │   • auto-RSVP "yes"           │
+   │   • UPSERT → meetings         │
+   └───────────────┬──────────────┘
+                   │  rows: status=SCHEDULED, start_time, end_time, meet_url, organizer
+                   ▼
+        ┌────────────────────────┐
+        │   NEON POSTGRES        │   the work queue (survives restarts)
+        │   meetings table       │   every meeting + its start_time + status
+        └───────────┬────────────┘
+                   │  SELECT ... on every tick
+                   ▼
+   ┌──────────────────────────────┐
+   │  CLOCK B: scheduler.tick()    │   every ~20s (prod)
+   │   asks each lap:              │
+   │   "SCHEDULED rows with        │
+   │    start_time ≤ now + 60s     │   ◀── dispatch_lead_seconds = 60
+   │    AND ≥ now − 30m ?"         │
+   │   → claim (SKIP LOCKED)       │
+   │   → Vexa POST /bots = SEND BOT │
+   └───────────────┬──────────────┘
+                   │
+                   ▼
+            VEXA CLOUD → joins the Google Meet
+```
+
+**How it "knows a meeting starts in a minute":** it doesn't get told — Clock B
+*polls the database* every ~20s and claims any meeting whose `start_time` is ≤ 60s
+away. The `start_time` was copied into the DB by Clock A up to 24h earlier, so at
+dispatch time the calendar is no longer in the loop; the scheduler is purely a
+countdown over rows it already has. Worst-case lag from "invite sent" to "we know
+about it" is **one poller lap (≤60s)**; from "due" to "bot dispatched" is **one
+scheduler lap (≤20s)**.
+
+### One invite, end to end (at a glance)
+
+```
+[1] someone invites centralagentai@gmail.com to a Meet event ──▶ Send
+[2] Google drops the invite on the bot's calendar (needs "add invites from everyone")
+[3] ≤60s  CLOCK A: sees it, auto-RSVPs "yes", UPSERTs row  → status=SCHEDULED
+[4]       row WAITS in the DB until its start time nears (minutes…hours)
+[5] T-60s CLOCK B: claims it → JOINING → Vexa POST /bots → bot joins (human Admits once)
+[6]       bot records + transcribes                       → status=ACTIVE
+[7]       meeting ends (leave / end-call / end_time+grace); bot leaves ~45s after alone
+                                                           → status=PROCESSING
+[8]       CLOCK B finalize: transcript → Gemini insights → Gmail send
+                                                           → status=COMPLETED ✅
+```
+
+The sections below expand each piece: §1 the full picture, §2 pull-vs-push, §3/§4
+the two loops in detail, §5 the state machine, §6 a concrete timeline.
+
+---
+
 ## 1. The big picture
 
 ```
