@@ -136,6 +136,32 @@ engine = create_async_engine(
 config.set_main_option("sqlalchemy.url", settings.async_database_url_direct)
 ```
 
+### 2.4 Enum status stored **UPPERCASE** — a diagnostic query silently returned nothing
+- **Symptom:** A raw-SQL health check for stuck meetings
+  (`... WHERE status IN ('scheduled','pending',...)`) returned **0 rows**, even
+  though a meeting was visibly stuck in `SCHEDULED`. The query looked correct but
+  was a false negative — nearly hid a real bug (see 5.9).
+- **Root cause:** The `Meeting.status` column uses
+  `SAEnum(MeetingStatus, native_enum=False)`. SQLAlchemy stores the enum's
+  **member name** (e.g. `'SCHEDULED'`, `'COMPLETED'` — uppercase), while the API
+  serializes the **value** (`'scheduled'` — lowercase) via `.value`. So the
+  Python/API layer sees lowercase, but the actual bytes in Postgres are
+  uppercase. A lowercase `IN (...)` filter matches nothing.
+- **Solution:** Any **raw SQL** against `meeting.status` must use the uppercase
+  member names. The ORM (`Meeting.status == MeetingStatus.SCHEDULED`) handles the
+  mapping automatically — only hand-written SQL is exposed to the gotcha.
+
+```sql
+-- WRONG (matches nothing — column holds member names, not values)
+SELECT id FROM meeting WHERE status IN ('scheduled', 'pending');
+-- CORRECT
+SELECT id FROM meeting WHERE status IN ('SCHEDULED', 'PENDING');
+```
+
+> **Lesson:** `native_enum=False` decouples the *stored* representation (member
+> name) from the *serialized* one (value). When the ORM and raw SQL disagree,
+> check which one the column actually persists before trusting a query's "0 rows."
+
 ---
 
 ## 3. Auth & Google APIs
@@ -334,6 +360,99 @@ def test_no_vexa_status_maps_to_completed():
   transcript **skips the model entirely**. Verified live (empty decisions/risks
   stayed empty, no hallucination).
 
+### 5.8 Insight email arrived **~12 minutes** after the host left
+- **Symptom:** After a real meeting, the host clicked the red **"Leave call"**
+  button and the insight email didn't land for **~12 minutes**. End-to-end the
+  pipeline was correct — it was just slow.
+- **Root cause:** "Leave call" only removes *you*; the room stays open and the bot
+  is now **alone** in it. Vexa's default `automatic_leave.max_time_left_alone` is
+  **900000 ms (15 minutes)** — so the bot sits in the empty room for ~15 min before
+  Vexa marks the meeting ended. Our finalize pipeline keys off *the bot being gone*
+  (5.3), so it couldn't run until Vexa let the bot leave. We had never overridden
+  the default, so we inherited the full 15-minute linger. (Confirmed against the
+  cloned Vexa repo: `POST /bots` accepts `automatic_leave: {max_time_left_alone,
+  no_one_joined_timeout, ...}` in ms.)
+- **Solution (two config knobs, nothing hardcoded):**
+  1. Send our **own** `automatic_leave` on every dispatch: leave **45 s** after the
+     room empties (`VEXA_LEAVE_WHEN_ALONE_SECONDS=45`), and give a no-show meeting
+     **5 min** to start (`VEXA_NO_ONE_JOINED_TIMEOUT_SECONDS=300`).
+  2. Tighten the scheduler loop **30 s → 20 s** (`SCHEDULER_INTERVAL_SECONDS=20`) so
+     end-detection + finalize fire sooner once the bot is gone.
+  - **Result:** post-leave latency **~12 min → ~1 min**. ("End call for everyone"
+    evicts the bot instantly, so that path is even faster.) Applies to **new**
+    dispatches; the 45 s is the irreducible "confirm everyone's gone" wait —
+    cutting it further needs Vexa webhooks, but the bot must still leave first.
+
+```python
+# services/vexa/cloud_provider.py — override Vexa's slow 15-min default per dispatch
+payload["automatic_leave"] = {
+    "max_time_left_alone": settings.vexa_leave_when_alone_seconds * 1000,   # 45s -> ms
+    "no_one_joined_timeout": settings.vexa_no_one_joined_timeout_seconds * 1000,  # 300s
+}
+```
+
+> **Why config, not constants:** these are timing trade-offs we expect to tune in
+> production (a flaky network might want 60 s alone), so they live in `config.py` +
+> env, never baked into the call site.
+
+### 5.9 Meetings stuck in `SCHEDULED` **forever** — the "zombie" bug
+- **Symptom:** Meeting **#83** sat in `SCHEDULED` for **3.5 hours** — no bot was
+  ever dispatched, and it never moved to a failed state either. It just hung. A
+  health scan found it lingering with `vexa_bot_id = NULL` long after its start
+  time had passed.
+- **Root cause:** A **gap between two passes** that each looked correct alone:
+  - `dispatch_due._claim_due` deliberately only claims a meeting whose start is
+    within the last **30 minutes** (`_STALE_AFTER`): `start_time >= now - 30m`. This
+    is right — you don't want a bot joining a meeting that began an hour ago.
+  - `recover_stale` rescued meetings stuck in `JOINING`/`ACTIVE`, but had **no
+    branch** for a meeting whose start was missed by >30 min before any bot was sent
+    (e.g. the app was redeploying at start time, or the invite was detected late).
+  - So such a meeting was **never claimable** (too old for `_claim_due`) and
+    **never retired** (no `recover_stale` branch) → a permanent zombie: not run,
+    not failed, just stuck. Nothing in the system would ever touch it again.
+- **Solution:** Add the missing branch. A pure, unit-testable helper decides
+  "missed", and `recover_stale` retires those rows to `FAILED_JOIN` with an
+  explicit reason. The boundary is aligned **exactly** with `_claim_due` (strict
+  `>`), and `recover_stale` runs **before** `dispatch_due` in the same tick, so no
+  meeting can be both retired and dispatched in one pass.
+
+```python
+# scheduler.py — pure, testable boundary (mirrors _claim_due's lower bound exactly)
+def dispatch_window_missed(meeting, now, *, stale_after) -> bool:
+    # _claim_due claims start_time >= now - stale_after (boundary still claimable),
+    # so a meeting is "missed" only when strictly older: now > start + stale_after.
+    return meeting.start_time is not None and now > meeting.start_time + stale_after
+
+# scheduler.recover_stale — retire the unrecoverable instead of leaving it to hang
+missed = (await db.execute(select(Meeting).where(
+    Meeting.status.in_([MeetingStatus.SCHEDULED, MeetingStatus.PENDING]),
+    Meeting.vexa_bot_id.is_(None),
+    Meeting.start_time.is_not(None),
+    Meeting.start_time < now - _STALE_AFTER,
+))).scalars().all()
+for m in missed:
+    m.status = MeetingStatus.FAILED_JOIN
+    m.failure_reason = "missed dispatch window: scheduled start passed by more than 30 minutes..."
+    log.warning("recovered_missed_window", meeting_id=m.id, start_time=m.start_time.isoformat())
+```
+
+- **Why `FAILED_JOIN` and not a new `EXPIRED` enum:** adding an enum member is a
+  schema/migration change with churn; the existing `FAILED_JOIN` already means
+  "we never got a bot into the meeting," and `failure_reason` carries the precise
+  distinction ("missed dispatch window..."). Cheapest correct fix.
+- **Verified live, not assumed:** 5 new unit tests (incl. the exact boundary case)
+  → **45/45 pass**; committed `8120c5a`, deployed; on the new container's **first**
+  scheduler tick the log showed `recovered_missed_window meeting_id=83`; the DB then
+  showed #83 = `FAILED_JOIN` with the reason, and **0 zombies** remaining. Because
+  the fix is in the *rule*, no future meeting can hang this way again.
+
+> **Lesson:** when one pass owns a lower bound (`_claim_due`: "only recent
+> meetings"), **some other pass must own everything below it.** A guard that says
+> "don't act" without a paired rule that says "then close it out" is how rows leak
+> into limbo. Recovery coverage is now total: stuck `JOINING` → `SCHEDULED`;
+> ancient `JOINING`/`ACTIVE` → `PROCESSING`; missed-window `SCHEDULED`/`PENDING` →
+> `FAILED_JOIN`.
+
 ---
 
 ## 6. Deployment (Railway)
@@ -350,12 +469,31 @@ key="${line%%=*}"; val="${line#*=}"
 args+=(--set "$line")
 ```
 
-### 6.2 Railway project link is directory-scoped
+### 6.2 Railway project link is directory-scoped (and `railway up` from root is worse than a no-op)
 - **Symptom:** `railway variables ...` from the repo root → "No linked project."
+  Worse: `railway up` from the repo root didn't error — it **silently created a
+  brand-new stray project** named `centralagent` (status Failed, no domain) instead
+  of deploying to the live one.
 - **Root cause:** `railway init` linked the project to `backend/`; the link is
-  per-directory.
-- **Solution:** Run all `railway` commands from `backend/` (where the Dockerfile
-  and link live).
+  **per-directory**. From an unlinked directory, `railway up` falls back to
+  "create a new project," so a wrong CWD doesn't fail loudly — it forks your deploy
+  target. The trap is that **Bash CWD persists between tool calls**: a `cd <root>`
+  for an earlier `git` command left the shell at root, so the next `railway up` hit
+  the wrong (unlinked) directory.
+- **Solution:** Run **all** `railway` commands from `backend/` (where the Dockerfile
+  and the link live). Before any `railway up`, confirm the target with
+  `railway status` — it must show the live project / real URL, not a fresh one.
+
+```bash
+cd /Users/rohitbind/Desktop/centralagent/backend   # the ONLY linked dir
+railway status   # verify: project beece035... / https://centralagent-production-457c.up.railway.app
+railway up       # deploy to the live service
+```
+
+> **Lesson:** a CLI that "helpfully" creates a resource when it can't find a link
+> turns a wrong working directory into a silent duplicate. Treat directory-scoped
+> CLIs (Railway, Terraform workspaces, gcloud configs) like a loaded `cd` — verify
+> the target before any mutating command.
 
 ### 6.3 `railway logs` is a snapshot, not a stream
 - **Symptom:** A backgrounded `railway logs | grep` exited immediately instead of
@@ -413,6 +551,19 @@ def missing_required(self) -> list[str]:
   (`process_pending`) made the lifecycle robust to stale provider flags.
 - **Timezone bugs are usually display bugs** (4.2). Store/compare UTC everywhere;
   the surprise is almost always the calendar's zone vs the wall clock.
+- **Inherited defaults are decisions you didn't make** (5.8). A third party's
+  15-minute "leave when alone" default became *our* 12-minute latency until we
+  overrode it. Audit the defaults of every external call on a hot path.
+- **Every lower bound needs a paired catch-all** (5.9). The dispatcher's "only
+  recent meetings" guard was correct, but nothing owned the rows below it, so they
+  leaked into limbo forever. A "don't act" rule must be paired with a "then retire
+  it" rule, or things get stuck silently.
+- **Verify a query before trusting its zero** (2.4 / 5.9). The zombie nearly hid
+  behind a lowercase `IN (...)` that matched nothing because the column stores
+  uppercase enum names. "0 rows" is a claim to verify, not a fact to trust.
+- **Fix the rule, not the row** (5.9). We retired meeting #83 by changing the
+  *scheduler's logic*, not by hand-patching one record — so the class of bug is
+  closed, not just one instance.
 
 See also: [ARCHITECTURE.md](./ARCHITECTURE.md) (how it all fits together) and
 [DEPLOY.md](./DEPLOY.md) (the deploy runbook).
