@@ -23,8 +23,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.db.models import Meeting, MeetingStatus
+from app.db.models import ACTIVE_STATUSES, Meeting, MeetingStatus
 from app.logging_config import get_logger
+from app.services.gmail.invite_parser import ParsedInvite
 from app.services.gmail.invite_parser import parse as parse_invite
 from app.services.gmail.reader import GmailReader
 
@@ -74,7 +75,7 @@ async def scan_once(
         return 0
 
     # 3. Fetch + parse each new message.
-    rows: list[dict] = []
+    parsed_by_mid: list[tuple[str, ParsedInvite]] = []
     for mid in new_ids:
         try:
             msg = await reader.get_message(mid)
@@ -90,6 +91,48 @@ async def scan_once(
         if parsed is None:
             log.info("gmail_scan_skip_no_meet", message_id=mid, subject=msg.subject[:80])
             continue
+        parsed_by_mid.append((mid, parsed))
+
+    if not parsed_by_mid:
+        log.info("gmail_scan_no_actionable", checked=len(new_ids))
+        return 0
+
+    # 3b. Cross-source dedup: never create a Gmail row for a meeting that is
+    #     already tracked (by the calendar poller, a manual dispatch, or a prior
+    #     scan of a different invite email for the same meeting). A live Google
+    #     Meet room cannot host two concurrent sessions, so a same-code meeting
+    #     in any non-terminal state IS this meeting — dispatching again would put
+    #     a second bot in the room and send a duplicate insight email. The
+    #     narrow query (meetings-noreply sender) already excludes calendar
+    #     invitations; this is the belt to that suspenders.
+    candidate_native_ids = {p.native_meeting_id for _, p in parsed_by_mid}
+    inflight_result = await db.execute(
+        select(Meeting.native_meeting_id).where(
+            Meeting.native_meeting_id.in_(candidate_native_ids),
+            Meeting.status.in_(ACTIVE_STATUSES),
+        )
+    )
+    inflight_native_ids = {row[0] for row in inflight_result.fetchall()}
+
+    rows: list[dict] = []
+    seen_native_ids: set[str] = set()
+    for mid, parsed in parsed_by_mid:
+        if parsed.native_meeting_id in inflight_native_ids:
+            log.info(
+                "gmail_scan_skip_already_tracked",
+                message_id=mid,
+                native_meeting_id=parsed.native_meeting_id,
+            )
+            continue
+        # Two invite emails in the same batch for the same meeting -> keep one.
+        if parsed.native_meeting_id in seen_native_ids:
+            log.info(
+                "gmail_scan_skip_dupe_in_batch",
+                message_id=mid,
+                native_meeting_id=parsed.native_meeting_id,
+            )
+            continue
+        seen_native_ids.add(parsed.native_meeting_id)
 
         # For instant meets (no scheduled time in the email), treat start_time
         # as "now" — this places the row inside _claim_due's dispatch window
@@ -113,7 +156,7 @@ async def scan_once(
         )
 
     if not rows:
-        log.info("gmail_scan_no_actionable", checked=len(new_ids))
+        log.info("gmail_scan_all_tracked", checked=len(parsed_by_mid))
         return 0
 
     # 4. Upsert — idempotent on gmail_message_id.

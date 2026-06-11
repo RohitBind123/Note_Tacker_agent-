@@ -105,11 +105,16 @@ class Settings(BaseSettings):
     # ge=1 prevents maxResults=0 which the Gmail API rejects with HTTP 400.
     gmail_scan_max_results: int = Field(default=25, ge=1, le=500, alias="GMAIL_SCAN_MAX_RESULTS")
     # Tune the Gmail search query without a deploy.
+    # Scoped to meetings-noreply@google.com — the sender Google Meet uses for
+    # "Add people" / instant-meeting invites, which create NO Calendar event (so
+    # the calendar poller is blind to them). Calendar invitations come from the
+    # organizer instead, so they are intentionally excluded here to avoid the
+    # scanner creating a duplicate row for a meeting the poller already handles.
     # ROLLOUT NOTE: on first enable, widen to newer_than:7d so invites received
     # before the feature was turned on are not missed. Restore to newer_than:1d
     # after the first successful scan cycle.
     gmail_scan_query: str = Field(
-        default='"meet.google.com" newer_than:1d -in:chats -in:sent',
+        default='from:meetings-noreply@google.com "meet.google.com" newer_than:1d',
         alias="GMAIL_SCAN_QUERY",
     )
 

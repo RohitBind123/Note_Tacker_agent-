@@ -44,19 +44,42 @@ def _make_reader(*, ids: list[str], messages: dict[str, GmailMessage]) -> AsyncM
     return reader
 
 
-def _mock_db(*, known_ids: list[str] | None = None) -> AsyncMock:
-    """Return a mock async DB session.
+def _mock_db(
+    *,
+    known_ids: list[str] | None = None,
+    inflight_native_ids: list[str] | None = None,
+) -> AsyncMock:
+    """Return a mock async DB session that sequences its SELECT results.
 
-    ``known_ids`` simulates existing gmail_message_id values already in the DB
-    (the pre-filter dedup step). An empty list means the DB has no records yet.
+    scan_once issues up to three execute() calls in a fixed order:
+      1. dedup SELECT       -> existing gmail_message_id values  (``known_ids``)
+      2. in-flight SELECT   -> native_meeting_ids already tracked (``inflight_native_ids``)
+      3. INSERT ... ON CONFLICT
+
+    ``known_ids`` simulates rows already processed (skips body fetch).
+    ``inflight_native_ids`` simulates meetings already tracked by the calendar
+    poller / a prior scan (the cross-source dedup guard).
     """
     known_ids = known_ids or []
+    inflight_native_ids = inflight_native_ids or []
     db = AsyncMock()
 
-    # Simulate the SELECT for existing IDs.
-    select_result = MagicMock()
-    select_result.fetchall.return_value = [(mid,) for mid in known_ids]
-    db.execute = AsyncMock(return_value=select_result)
+    dedup_result = MagicMock()
+    dedup_result.fetchall.return_value = [(mid,) for mid in known_ids]
+
+    inflight_result = MagicMock()
+    inflight_result.fetchall.return_value = [(nid,) for nid in inflight_native_ids]
+
+    insert_result = MagicMock()
+    results = [dedup_result, inflight_result, insert_result]
+    counter = {"i": 0}
+
+    async def execute_side_effect(_stmt, *args, **kwargs):
+        i = counter["i"]
+        counter["i"] += 1
+        return results[min(i, len(results) - 1)]
+
+    db.execute = AsyncMock(side_effect=execute_side_effect)
     db.commit = AsyncMock()
     return db
 
@@ -126,8 +149,8 @@ async def test_valid_meet_invite_upserts_row():
         count = await scan_once(db, reader=reader)
 
     assert count == 1
-    # SELECT (dedup) + INSERT (upsert) = 2 execute calls
-    assert db.execute.call_count == 2
+    # SELECT (dedup) + SELECT (in-flight native_id guard) + INSERT (upsert) = 3
+    assert db.execute.call_count == 3
     db.commit.assert_called_once()
 
 
@@ -216,3 +239,46 @@ async def test_fetch_error_for_one_message_continues_others():
 
     # msg_bad failed but msg_good should still be processed
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_skips_invite_already_tracked_by_native_id():
+    """A meeting already tracked (same Meet code, non-terminal) must NOT be
+    re-inserted — otherwise the bot would be dispatched twice to one room."""
+    # Default fake message parses to native id abc-defg-hij.
+    msg = _fake_message(message_id="msg_new")
+    reader = _make_reader(ids=["msg_new"], messages={"msg_new": msg})
+    # New gmail id (not in known_ids) but its Meet code is already in flight.
+    db = _mock_db(known_ids=[], inflight_native_ids=["abc-defg-hij"])
+
+    with patch("app.services.gmail_scanner.settings") as s:
+        s.gmail_scan_enabled = True
+        s.gmail_scan_query = "test"
+        s.gmail_scan_max_results = 25
+        count = await scan_once(db, reader=reader)
+
+    assert count == 0
+    # dedup SELECT + in-flight SELECT ran; NO insert, NO commit.
+    assert db.execute.call_count == 2
+    db.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_two_invites_same_native_id_inserts_one():
+    """Two invite emails for the SAME meeting (same Meet code) collapse to one row."""
+    body = "https://meet.google.com/abc-defg-hij"  # same code, no timestamp
+    msg1 = _fake_message(message_id="msg_a", subject="Video call", body_text=body)
+    msg2 = _fake_message(message_id="msg_b", subject="Video call (resent)", body_text=body)
+    reader = _make_reader(
+        ids=["msg_a", "msg_b"], messages={"msg_a": msg1, "msg_b": msg2}
+    )
+    db = _mock_db(known_ids=[], inflight_native_ids=[])
+
+    with patch("app.services.gmail_scanner.settings") as s:
+        s.gmail_scan_enabled = True
+        s.gmail_scan_query = "test"
+        s.gmail_scan_max_results = 25
+        count = await scan_once(db, reader=reader)
+
+    assert count == 1  # one row despite two emails
+    db.commit.assert_called_once()
