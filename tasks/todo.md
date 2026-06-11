@@ -125,27 +125,27 @@ copilot engine context = retrieval(pgvector) + recent chat + meeting memory + me
 
 ## Batches (TDD; pytest green + commit between each)
 
-### Batch 0 — Config + flags + bot identity
-- [ ] config.py: COPILOT_ENABLED, COPILOT_TRIGGERS(csv, "@centralagent"), VEXA_WS_URL,
+### Batch 0 — Config + flags + bot identity  [DONE aa0a71d]
+- [x] config.py: COPILOT_ENABLED, COPILOT_TRIGGERS(csv, "@centralagent"), VEXA_WS_URL,
       COPILOT_CHAT_POLL_INTERVAL_SECONDS, GEMINI_EMBED_MODEL(gemini-embedding-001), EMBED_DIMENSIONS(768),
       VEXA_WEBHOOK_SECRET, COPILOT_MEMORY_REFRESH_SECONDS, COPILOT_CONTEXT_TOP_K.
-- [ ] Bot joins as visible name "CentralAgent" (so @centralagent is discoverable).
-- [ ] Tests: settings parse / trigger csv split.
+- [ ] Bot joins as visible name "CentralAgent" (so @centralagent is discoverable). -> Batch 6 wiring.
+- [x] Tests: settings parse / trigger csv split. (test_copilot_config.py)
 
-### Batch 1 — DB models + pgvector migration
-- [ ] Models: MeetingChatMessage, MeetingMemory, TranscriptChunk(embedding vector(768)), CopilotInteraction.
-- [ ] Migration: CREATE EXTENSION IF NOT EXISTS vector; tables; HNSW cosine index; idempotency unique indexes; IF NOT EXISTS; direct URL.
-- [ ] Validate additively vs real Neon; row-count audit before any constraint.
+### Batch 1 — DB models + pgvector migration  [DONE aa0a71d]
+- [x] Models: MeetingChatMessage, MeetingMemory, TranscriptChunk(embedding vector(768)), CopilotInteraction.
+- [x] Migration: CREATE EXTENSION IF NOT EXISTS vector; tables; HNSW cosine index; idempotency unique indexes; IF NOT EXISTS; direct URL. (d4e5f6a7b8c9 — NOT yet applied to prod; needs authorization before E2E.)
+- [x] Validate additively vs real Neon; row-count audit before any constraint. (pgvector 0.8.1 available; head matches down_revision; all tables new -> zero violations.)
 
-### Batch 2 — Vexa client extensions
-- [ ] get_chat / send_chat / set_webhook on provider + cloud_provider.
-- [ ] WS client: connect (X-API-Key), subscribe, async-iterate, parse chat.received/transcript.mutable, reconnect.
-- [ ] Tests: httpx-mocked get/send/webhook; WS frame parse from sample JSON.
+### Batch 2 — Vexa client extensions  [DONE 62d9980]
+- [x] get_chat / send_chat / set_webhook on provider + cloud_provider.
+- [x] WS client: connect (X-API-Key), subscribe, async-iterate, parse chat.received/transcript.mutable, reconnect.
+- [x] Tests: httpx-mocked get/send/webhook; WS frame parse from sample JSON.
 
-### Batch 3 — Embeddings + retrieval
-- [ ] Embed client: gemini-embedding-001, 768, taskType, L2-normalize, batch endpoint.
-- [ ] Chunker (pure): segments -> overlapping chunks w/ speaker/time. Store+embed on delta; cosine top-k.
-- [ ] Tests: chunker pure; embed mocked (shape+normalize); retrieval SQL.
+### Batch 3 — Embeddings + retrieval  [DONE]
+- [x] Embed client: gemini-embedding-001, 768, taskType, L2-normalize (pure math), batch endpoint, fail-loud dim guard.
+- [x] Chunker (pure): segments -> deterministic-prefix chunks w/ speaker/time. index_transcript embeds only NEW chunks (idempotent on (meeting_id, chunk_index), ON CONFLICT DO NOTHING); retrieve_context = cosine top-k via HNSW.
+- [x] Tests: chunker pure (10) + determinism invariant; embed mocked shape+normalize+dim guard (10). Retrieval SQL validated against real Neon in E2E batch.
 
 ### Batch 4 — Meeting memory builder
 - [ ] Gemini extract over new transcript -> decisions/action_items/risks/open_questions/rolling_summary; idempotent upsert; delta guard.
