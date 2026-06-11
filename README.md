@@ -33,13 +33,9 @@ meeting-end and a per-meeting lock collapsed them to exactly one email (~8s late
 ## Documentation
 | Doc | What it covers |
 |---|---|
-| [docs/HOW_IT_WORKS_WALKTHROUGH.md](docs/HOW_IT_WORKS_WALKTHROUGH.md) | **Start here** — plain-English, no-jargon end-to-end story of one real meeting, explaining every component as it's used |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **Start here** — full system design: diagrams, pull-vs-push detection, scheduler timing, **Phase 2 in-meeting copilot (§4b: retrieval, rolling memory, idempotency)**, state machine, end-to-end trace, components, config knobs, decisions, gotchas |
 | [docs/SETUP.md](docs/SETUP.md) | Credentials & onboarding — Google OAuth, Vexa, Gemini, Neon; how to obtain every secret |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full system design — diagrams, pull-vs-push detection, scheduler timing, **Phase 2 in-meeting copilot (§4b: retrieval, rolling memory, idempotency)**, state machine, end-to-end trace, components, config knobs, decisions, gotchas |
-| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | All endpoints — health, meetings, admin, webhooks (with curl examples + schemas) |
-| [docs/CHALLENGES.md](docs/CHALLENGES.md) | Every dev/deploy blocker hit, with root cause + fix + code |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Railway + Neon deploy runbook + day-2 operations (stop/redeploy/restart) |
-| [docs/DOCKER_EXPLAINED.md](docs/DOCKER_EXPLAINED.md) | Plain-English, end-to-end explanation of how Docker packages & runs the app |
 | [docs/CALENDAR_PUSH.md](docs/CALENDAR_PUSH.md) | Enabling real-time push (events.watch) once you own a verified domain |
 | [docs/ZERO_CLICK_AUTO_ADMIT.md](docs/ZERO_CLICK_AUTO_ADMIT.md) | Plan + risks for the signed-in self-hosted bot (removes the last manual click) |
 | [tasks/todo.md](tasks/todo.md) | Build plan + per-phase decision log |
@@ -104,7 +100,7 @@ backend/app/
       webhook.py        #   Vexa meeting.completed → instant finalize
 backend/alembic/        # async migrations (Neon direct URL; pgvector + Phase 2 tables)
 backend/tests/          # unit tests (respx for HTTP, pure-logic for scheduler + copilot)
-docs/                   # ARCHITECTURE.md, CHALLENGES.md, DEPLOY.md
+docs/                   # ARCHITECTURE.md, SETUP.md, DEPLOY.md
 tools/                  # one-off helpers (OAuth refresh-token capture)
 tasks/todo.md           # build plan + decision log
 ```

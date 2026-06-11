@@ -127,5 +127,4 @@ This composes cleanly with the existing design:
 - Keep the **one admit click** as the accepted cost until self-host is proven —
   the rest of the pipeline is already zero-touch.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) (provider abstraction) and
-[CHALLENGES.md §1.2, §5.1](./CHALLENGES.md).
+See [ARCHITECTURE.md](./ARCHITECTURE.md) (provider abstraction).
