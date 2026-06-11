@@ -151,11 +151,12 @@ copilot engine context = retrieval(pgvector) + recent chat + meeting memory + me
 - [x] Gemini structured extract over transcript -> summary/decisions/action_items/risks/open_questions; idempotent upsert on meeting_id (ON CONFLICT DO UPDATE); delta guard (should_rebuild: skip <MIN_GROWTH_CHARS growth unless force); insufficient-content guard (<_MIN_CHARS -> empty, no model call).
 - [x] Tests: prompt build + structured JSON parse (Gemini mocked, 4) + delta-guard truth table (4). Suite 144 green.
 
-### Batch 5 — Copilot Q&A engine + mention router
-- [ ] Trigger parser (pure): COPILOT_TRIGGERS case-insensitive; strip handle -> question.
-- [ ] Engine: context (retrieval + recent chat + memory + metadata) -> Gemini -> reply. Answer each mention once (CopilotInteraction dedup).
-- [ ] Intents: summarize so far / decisions / action items (mine to sender) / what did X say / did we discuss Y.
-- [ ] Tests: trigger parse table; engine mocked.
+### Batch 5 — Copilot Q&A engine + mention router  [DONE]
+- [x] Trigger parser (pure): COPILOT_TRIGGERS case-insensitive; strips every handle occurrence -> question (MentionParse).
+- [x] Engine: build_context_block (pure) assembles retrieval + recent chat + memory + metadata; CopilotEngine.answer -> Gemini text (grounded, length-capped MAX_ANSWER_CHARS).
+- [x] Router handle_mention: idempotent claim (INSERT CopilotInteraction ON CONFLICT (chat_message_id) DO NOTHING RETURNING id) -> answer once; SKIPPED (empty), ANSWERED, FAILED lifecycle; context_chunk_ids stored for audit.
+- [x] Tests: trigger parse table (13) + engine context render + answer mocked (6). Router DB claim validated in E2E. Suite 163 green.
+- NOTE: intent routing (decisions/action-items/what-did-X-say) is handled by grounding the single LLM call with the right context, not hardcoded intents — the memory+retrieval context covers all four.
 
 ### Batch 6 — Live wiring (WS manager + webhook endpoint + runner)
 - [ ] WS manager loop (gated COPILOT_ENABLED): one conn, subscribe all ACTIVE meetings, route chat->router, transcript->memory/chunker; reconnect; poll fallback.
