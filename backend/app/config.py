@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     vexa_api_base: str = Field(default="https://api.cloud.vexa.ai", alias="VEXA_API_BASE")
     vexa_api_key: str = Field(default="", alias="VEXA_API_KEY")
     vexa_transcription_token: str = Field(default="", alias="VEXA_TRANSCRIPTION_TOKEN")
+    # How long the bot lingers alone in a Meet before leaving (Vexa default is 900s
+    # = 15 min, which delays insight delivery). Lower = insights arrive sooner after
+    # everyone leaves. Sent as automatic_leave.max_time_left_alone (ms) on dispatch.
+    vexa_leave_when_alone_seconds: int = Field(default=45, alias="VEXA_LEAVE_WHEN_ALONE_SECONDS")
+    # How long to wait for anyone to join before giving up (Vexa default 120s).
+    vexa_no_one_joined_timeout_seconds: int = Field(
+        default=300, alias="VEXA_NO_ONE_JOINED_TIMEOUT_SECONDS"
+    )
 
     # --- Gemini ---
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")

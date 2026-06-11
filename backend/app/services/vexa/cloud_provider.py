@@ -43,7 +43,18 @@ class CloudVexaProvider(BotProvider):
         payload = {"platform": platform, "native_meeting_id": native_meeting_id}
         if bot_name:
             payload["bot_name"] = bot_name
-        log.info("vexa_join_request", native_meeting_id=native_meeting_id, platform=platform)
+        # Make the bot leave promptly once everyone else is gone, so insights are
+        # delivered soon after the meeting ends (Vexa's 15-min default is too slow).
+        payload["automatic_leave"] = {
+            "max_time_left_alone": settings.vexa_leave_when_alone_seconds * 1000,
+            "no_one_joined_timeout": settings.vexa_no_one_joined_timeout_seconds * 1000,
+        }
+        log.info(
+            "vexa_join_request",
+            native_meeting_id=native_meeting_id,
+            platform=platform,
+            leave_when_alone_s=settings.vexa_leave_when_alone_seconds,
+        )
         resp = await request_with_retries(
             "POST", f"{self._base}/bots", headers=self._headers(), json=payload, timeout=_TIMEOUT
         )
