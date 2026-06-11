@@ -82,8 +82,10 @@ async def index_transcript(
             "chunk_index": chunk.index,
             "text": chunk.text,
             "speaker": chunk.speaker or None,
-            "start_time": chunk.start_time,
-            "end_time": chunk.end_time,
+            # Column is String(64) (verbatim bounds); stringify the numeric chunk
+            # span so the bind type matches the DDL.
+            "start_time": None if chunk.start_time is None else str(chunk.start_time),
+            "end_time": None if chunk.end_time is None else str(chunk.end_time),
             "char_count": chunk.char_count,
             "embedding": vector,
             "embed_model": embedder._model,  # noqa: SLF001 - record provenance

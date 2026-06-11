@@ -147,9 +147,9 @@ copilot engine context = retrieval(pgvector) + recent chat + meeting memory + me
 - [x] Chunker (pure): segments -> deterministic-prefix chunks w/ speaker/time. index_transcript embeds only NEW chunks (idempotent on (meeting_id, chunk_index), ON CONFLICT DO NOTHING); retrieve_context = cosine top-k via HNSW.
 - [x] Tests: chunker pure (10) + determinism invariant; embed mocked shape+normalize+dim guard (10). Retrieval SQL validated against real Neon in E2E batch.
 
-### Batch 4 — Meeting memory builder
-- [ ] Gemini extract over new transcript -> decisions/action_items/risks/open_questions/rolling_summary; idempotent upsert; delta guard.
-- [ ] Tests: prompt build + JSON parse (Gemini mocked).
+### Batch 4 — Meeting memory builder  [DONE]
+- [x] Gemini structured extract over transcript -> summary/decisions/action_items/risks/open_questions; idempotent upsert on meeting_id (ON CONFLICT DO UPDATE); delta guard (should_rebuild: skip <MIN_GROWTH_CHARS growth unless force); insufficient-content guard (<_MIN_CHARS -> empty, no model call).
+- [x] Tests: prompt build + structured JSON parse (Gemini mocked, 4) + delta-guard truth table (4). Suite 144 green.
 
 ### Batch 5 — Copilot Q&A engine + mention router
 - [ ] Trigger parser (pure): COPILOT_TRIGGERS case-insensitive; strip handle -> question.
