@@ -5,18 +5,24 @@ End-to-end goal: **invite `centralagentai@gmail.com` to a Google Meet → bot jo
 no human action except (today) one "Admit" click for the anonymous cloud bot.
 
 - **Runtime:** one FastAPI process on Railway (amd64) + Neon Postgres.
-- **Concurrency model:** two in-process `asyncio` loops (poller + scheduler). The
-  DB *is* the work queue — no Celery/Redis broker.
-- **Detection:** **polling** the bot's own calendar every 60s (push is built but
-  off — see §3).
+- **Concurrency model:** three in-process `asyncio` loops (calendar poller +
+  Gmail scanner + scheduler). The DB *is* the work queue — no Celery/Redis broker.
+- **Detection — two independent paths:** **poll** the bot's own calendar every
+  60s (§3) **and** **scan** the bot's Gmail inbox every 90s (§3b) for Meet invites
+  that create no Calendar event. Calendar push is built but off (§2).
 
 ---
 
 ## 0. Mental model — two clocks, no webhook
 
-Before the detailed diagrams: the entire system is **two timer-driven loops** and
-a database between them. **Nothing is event-driven** — Google never calls us. Each
+Before the detailed diagrams: the core is **two timer-driven loops** and a
+database between them. **Nothing is event-driven** — Google never calls us. Each
 loop wakes on its own clock, looks, acts, and goes back to sleep.
+
+> A **third** loop — the Gmail invite scanner (§3b) — is a *second detector* that
+> writes `SCHEDULED` rows into the same `meetings` table when a meeting has no
+> Calendar event. It is left out of this mental model to keep it clean: downstream,
+> the scheduler can't tell which detector produced a row.
 
 | | **Clock A — `calendar_poller`** | **Clock B — `scheduler.tick`** |
 |---|---|---|
@@ -82,7 +88,8 @@ scheduler lap (≤20s)**.
 ```
 
 The sections below expand each piece: §1 the full picture, §2 pull-vs-push, §3/§4
-the two loops in detail, §5 the state machine, §6 a concrete timeline.
+the two core loops in detail, §3b the Gmail scanner, §5 the state machine, §6 a
+concrete timeline.
 
 ---
 
@@ -126,7 +133,12 @@ the two loops in detail, §5 the state machine, §6 a concrete timeline.
         └─────────────────────────────────────────────────────────────────────┘
 ```
 
-Both loops are started by the FastAPI **lifespan** via `runner.start()`
+> **Not shown above:** a third loop — the **Gmail invite scanner** (§3b) — runs
+> alongside LOOP 1 and also UPSERTs `SCHEDULED` rows into `meetings`. It is a
+> *second detection path* for meetings that never create a Calendar event, so the
+> scheduler downstream is identical. Omitted from the diagram only to keep it legible.
+
+All three loops are started by the FastAPI **lifespan** via `runner.start()`
 (`services/runner.py`). A tick error is logged and the loop continues — a
 transient Google/Vexa/DB hiccup must never kill the worker.
 
@@ -157,6 +169,12 @@ a slow reconcile-poll as backstop.
 > So: we "scrape" the **bot's own** calendar, not the inviter's. An invite only
 > lands there if the bot account's *"Add invitations to my calendar = From
 > everyone"* setting is on (see Decision #3).
+
+> **Second pull path (§3b):** even with that setting on, a meeting created *from
+> meet.google.com* (via "Add people") produces **no Calendar event at all** — the
+> poller is structurally blind to it. The Gmail invite scanner covers that gap by
+> reading the invite email Google sends instead. It too is PULL (Gmail search on a
+> 90s timer), not push.
 
 ---
 
@@ -206,6 +224,62 @@ ON CONFLICT (google_event_id) DO UPDATE
 Polling the same event 100× = **1 row**. Re-polling a meeting already `ACTIVE`
 refreshes its metadata but **won't re-dispatch** (status/vexa fields preserved).
 New events land as `SCHEDULED`.
+
+---
+
+## 3b. LOOP 3 — Gmail invite scanner (every 90s, flag-gated)
+
+Files: `services/gmail_scanner.py`, `services/gmail/reader.py`,
+`services/gmail/invite_parser.py`.
+
+**Why it exists.** LOOP 1 only sees meetings that exist *as Calendar events*. A
+meeting started directly on **meet.google.com** and shared via **"Add people"**
+creates **no Calendar event** — Google emails the invitee instead. With
+calendar-only detection the bot is structurally blind to these (confirmed in prod:
+the poller logged `with_meet=0` while a real invite to `dwz-mvzb-esz` sat unread in
+the inbox; the bot never joined). This loop is the **second, independent detector**.
+Downstream, the scheduler treats its rows like any other `SCHEDULED` meeting.
+
+Default **OFF** (`GMAIL_SCAN_ENABLED=false`): it needs the `gmail.readonly` OAuth
+scope, a Google *restricted* scope that can only be added by re-consenting the
+bot's refresh token (not in code). Ships inert; enabled as a rollout step.
+
+```
+scan_once():
+  1. LIST message ids:  Gmail q = GMAIL_SCAN_QUERY
+       'from:meetings-noreply@google.com "meet.google.com" newer_than:1d'
+       └─ meetings-noreply@google.com is Meet's instant-invite sender; scoping to
+          it EXCLUDES organizer-sent calendar invitations LOOP 1 already owns.
+  2. FAST DEDUP:  drop ids already in meetings.gmail_message_id
+       └─ skips body download for seen mail → saves Gmail API quota
+  3. FETCH + PARSE each new email → {native_meeting_id, meet_url, title, organizer, start?}
+       └─ reader is multipart-safe: walks all leaf parts, text/plain wins
+  3b. CROSS-SOURCE DEDUP:  skip any Meet code already in a NON-TERMINAL row
+       (poller / manual / prior scan)  +  collapse duplicate emails in-batch
+  4. UPSERT meetings (idempotent), status=SCHEDULED, start_time = parsed OR now
+```
+
+### No double-dispatch — five layers
+A live Meet room can't host two concurrent sessions, so two rows for one code = two
+bots + a duplicate insight email. Guards, outermost first:
+
+1. **Narrow sender query** — calendar invitations (from the organizer) never match
+   `meetings-noreply@google.com`.
+2. **`gmail_message_id` fast dedup** — a re-seen email is skipped before its body is fetched.
+3. **Cross-source in-flight guard** — skip a Meet code already in a non-terminal
+   row (`ACTIVE_STATUSES`), i.e. one LOOP 1 or a manual dispatch already owns.
+4. **In-batch dedup** — two invite emails for the same code in one scan collapse to one row.
+5. **Idempotent upsert** — `ON CONFLICT (gmail_message_id) WHERE gmail_message_id
+   IS NOT NULL DO UPDATE`, inferred against a **partial unique index** (Calendar
+   rows leave `gmail_message_id` NULL and never collide). Re-scanning never makes a
+   second row. The upsert NEVER touches `status`/`vexa_bot_id` — same invariant as LOOP 1.
+
+### Why `start_time = now` for instant meets
+"Add people" invites carry no scheduled time. Setting `start_time = now` lands the
+row inside the scheduler's dispatch window (`start_time ≤ now + dispatch_lead_seconds`),
+so LOOP 2's next ~20s tick claims and joins immediately — no special-casing in the
+scheduler. Detection→bot-in-lobby verified live in prod (meeting #772: scan →
+`gmail_scan_upserted` → `scheduler_claimed` → `vexa_join_ok` → `awaiting_admission`).
 
 ---
 
@@ -291,6 +365,10 @@ empty Meet for hours.
 `COMPLETED` is owned **solely** by `send_report_email` (it means "insights
 emailed"). No provider status ever sets it directly — a guard test enforces this.
 
+The machine is **source-agnostic**: meetings detected by the Gmail scanner (§3b)
+enter at the same `SCHEDULED` state (with `start_time = now` for instant invites)
+and follow the identical path.
+
 ---
 
 ## 6. Full trace of ONE invite (concrete timeline)
@@ -338,9 +416,12 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 
 | Component | File | Role | Cadence |
 |---|---|---|---|
-| **Lifespan / runner** | `services/runner.py` | starts/stops the 2 loops | once at boot |
+| **Lifespan / runner** | `services/runner.py` | starts/stops the 3 loops | once at boot |
 | **Calendar poller** | `services/calendar_poller.py` | detect + auto-RSVP + upsert | **60s** |
 | **Calendar client** | `services/google/calendar.py` | GET events / PATCH RSVP | per poll |
+| **Gmail scanner** | `services/gmail_scanner.py` | detect Meet invites with no Calendar event + upsert | **90s** (flag-gated) |
+| **Gmail reader** | `services/gmail/reader.py` | read-only Gmail REST (list/get, multipart-safe) | per scan |
+| **Invite parser** | `services/gmail/invite_parser.py` | invite email → native_meeting_id / meet_url / time | per email |
 | **Google token** | `services/google/token.py` | refresh → access token | cached, on demand |
 | **Scheduler** | `services/scheduler.py` | dispatch + lifecycle | **30s** |
 | **Orchestrator** | `services/orchestrator.py` | join/stop/finalize logic | per meeting |
@@ -360,6 +441,10 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 |---|---|---|
 | `calendar_poll_interval_seconds` | 60 | LOOP 1 cadence |
 | `scheduler_interval_seconds` | 30 | LOOP 2 cadence |
+| `gmail_scan_enabled` | false | LOOP 3 on/off (needs `gmail.readonly` scope) |
+| `gmail_scan_interval_seconds` | 90 | LOOP 3 cadence |
+| `gmail_scan_query` | `from:meetings-noreply@google.com "meet.google.com" newer_than:1d` | Gmail search for instant-invite emails (widen to `7d` on first enable) |
+| `gmail_scan_max_results` | 25 | max emails inspected per scan |
 | `dispatch_lead_seconds` | 60 | how early the bot joins before start |
 | `meeting_end_grace_seconds` | 120 | wait past `end_time` before auto-stopping a lingering bot |
 | `email_recipients` | organizer | who gets the insight email: `organizer` or `all_attendees` |
@@ -400,6 +485,15 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
    transcript→Gemini→email. All "meeting ended" Vexa statuses
    (`completed`/`stopped`/`processing`) now map to `PROCESSING`; our `COMPLETED`
    is set **only** by `send_report_email`. A guard test enforces the invariant.
+8. **Two detection paths, not one (§3b).** Calendar-only detection silently dropped
+   every meeting born on meet.google.com (no Calendar event → poller blind). The
+   Gmail invite scanner is an independent second path; explicit cross-path dedup
+   (narrow sender query + in-flight `native_meeting_id` guard) keeps the two from
+   double-dispatching. Ships OFF until `gmail.readonly` is consented. The upsert
+   targets a **partial unique index** via index inference (`ON CONFLICT (col)
+   WHERE ...`) — `ON CONSTRAINT <name>` does **not** resolve a partial index and
+   crashed every scan tick in prod until fixed; a compile-level test now guards the
+   SQL shape. Full write-up: CHALLENGES §5.10.
 
 ---
 
@@ -421,6 +515,14 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
 - **Calendar timezone.** Times are stored/compared in UTC. A bot/organizer
   calendar set to GMT+00 makes "AM" entries land hours off in local time — set
   the calendar timezone to the user's actual zone.
+- **Gmail scanner needs a restricted scope + ships off.** `gmail.readonly` is a
+  Google *restricted* scope; it can't be added in code, only by re-consenting the
+  bot's refresh token. The scanner runs with `GMAIL_SCAN_ENABLED=false` until that
+  re-consent and the flag flip (a deliberate rollout step, §3b).
+- **Instant-invite `start_time = now`.** Gmail-detected meetings dispatch on the
+  next scheduler tick. If the invite email is stale (room already closed) the bot
+  attempts to join and fails fast (`failed_join`) — harmless, but expected when
+  first enabling with a wide `newer_than` window.
 
 ---
 
