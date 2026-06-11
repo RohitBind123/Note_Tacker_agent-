@@ -51,6 +51,12 @@ async def test_ack_skipped_when_disabled(monkeypatch):
     assert provider.calls == []  # disabled -> no chat call at all
 
 
+def test_ack_disabled_by_default():
+    # Meet chat is append-only, so the placeholder can never be replaced by the
+    # answer; it must stay off unless a deployment explicitly opts in via env.
+    assert settings.copilot_thinking_ack_enabled is False
+
+
 async def test_ack_failure_is_swallowed(monkeypatch):
     monkeypatch.setattr(settings, "copilot_thinking_ack_enabled", True)
     monkeypatch.setattr(settings, "copilot_thinking_ack_text", "thinking...")

@@ -139,12 +139,16 @@ class Settings(BaseSettings):
     # Shared secret for verifying inbound Vexa webhook HMAC signatures. Empty ->
     # the webhook endpoint rejects all calls (fail closed).
     vexa_webhook_secret: str = Field(default="", alias="VEXA_WEBHOOK_SECRET")
-    # Responsiveness: post an instant acknowledgement to the meeting chat the moment
-    # an @mention is claimed, before the (retrieval + LLM) answer is generated. Meet
-    # chat has no message-edit API, so this is a separate placeholder line rather than
-    # an in-place "typing" animation. Best-effort: a failed ack never blocks the answer.
+    # Responsiveness: optionally post an instant acknowledgement to the meeting chat
+    # the moment an @mention is claimed, before the (retrieval + LLM) answer.
+    # DEFAULT OFF: Meet chat is append-only (no edit/delete API), so the placeholder
+    # cannot be replaced by the answer the way ChatGPT/Perplexity do -- it lingers as a
+    # permanent separate line above every reply. Since answers land in ~3s, that stale
+    # line is clutter, not feedback. Kept behind a flag so it can be re-enabled via env
+    # if a future platform supports message replacement. Best-effort: a failed ack never
+    # blocks the answer.
     copilot_thinking_ack_enabled: bool = Field(
-        default=True, alias="COPILOT_THINKING_ACK_ENABLED"
+        default=False, alias="COPILOT_THINKING_ACK_ENABLED"
     )
     # The placeholder text. Kept emoji-free in code; override via env to add one
     # (e.g. COPILOT_THINKING_ACK_TEXT="CentralAgent is thinking...").
