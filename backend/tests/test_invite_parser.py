@@ -128,6 +128,44 @@ class TestOrganizerExtraction:
         )
         assert r.organizer_email == "priya@acme.com"
 
+    def test_inviter_mined_from_from_display_name(self):
+        # The exact production shape of a meet.google.com "Add people" invite:
+        # From is the meetings-noreply robot, but its display name IS the real
+        # inviter's address. That human must receive the insight.
+        r = _parse(
+            from_addr='"bangadu5346@gmail.com (via Google Meet)" <meetings-noreply@google.com>',
+            subject="Happening now: bangadu5346@gmail.com is inviting you to a video call",
+            body="bangadu5346@gmail.com is inviting you to join a video call\n"
+            "meet.google.com/jsk-iffx-amw",
+        )
+        assert r.organizer_email == "bangadu5346@gmail.com"
+
+    def test_inviter_mined_from_subject_when_display_name_bare(self):
+        r = _parse(
+            from_addr="meetings-noreply@google.com",
+            subject="Happening now: priya@acme.com is inviting you to a video call",
+            body="https://meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email == "priya@acme.com"
+
+    def test_inviter_mined_from_body_as_last_resort(self):
+        r = _parse(
+            from_addr="meetings-noreply@google.com",
+            subject="You've been invited to a video call",
+            body="sam@startup.io is inviting you to join a video call\n"
+            "meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email == "sam@startup.io"
+
+    def test_human_from_mailbox_wins_over_body(self):
+        # A Calendar invite From a real human keeps that address even if the body
+        # mentions someone else's email further down.
+        r = _parse(
+            from_addr="Priya <priya@acme.com>",
+            body="cc: ops@acme.com https://meet.google.com/abc-defg-hij",
+        )
+        assert r.organizer_email == "priya@acme.com"
+
     def test_empty_from_gives_none(self):
         r = _parse(from_addr="", body="https://meet.google.com/abc-defg-hij")
         assert r.organizer_email is None

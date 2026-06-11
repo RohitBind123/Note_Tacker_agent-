@@ -42,13 +42,18 @@ _ISO_DT_RE = re.compile(
     r"\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\b"
 )
 
+# Any RFC-5322-ish email address anywhere in a string.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
 # Google's automated senders for Meet/Calendar notifications. These are NEVER a
 # real person we can deliver an insight email to: a meet.google.com "Add people"
 # invite arrives From meetings-noreply@google.com, and calendar notices come From
-# calendar-notification@google.com. The real organizer of a calendar meeting is
-# resolved by the calendar poller via the Calendar API; for instant-meet invites
-# there is no human address in the headers at all, so we store None and let the
-# recipient resolver apply its configured fallback.
+# calendar-notification@google.com. The real human inviter, however, IS present in
+# such an invite — Google puts it in the From *display name* and the subject/body,
+# e.g. From: "bangadu5346@gmail.com (via Google Meet)" <meetings-noreply@google.com>
+#       Subject: "Happening now: bangadu5346@gmail.com is inviting you to a video call"
+# so we mine those for the real address and only fall back to None (→ resolver's
+# configured fallback) when no human address appears anywhere.
 _NONHUMAN_SENDERS = frozenset(
     {
         "meetings-noreply@google.com",
@@ -57,19 +62,48 @@ _NONHUMAN_SENDERS = frozenset(
 )
 
 
-def _human_organizer(from_addr: str) -> str | None:
-    """Return the sender address only if it could be a real, emailable human.
-
-    Drops empty headers and Google's automated no-reply / notification senders.
-    """
-    _, addr = parseaddr(from_addr)
-    addr = (addr or "").strip()
-    if not addr:
-        return None
-    low = addr.lower()
+def _is_human_email(addr: str) -> bool:
+    """True if ``addr`` could be a real, emailable human (not a Google robot)."""
+    low = (addr or "").strip().lower()
+    if not low or "@" not in low:
+        return False
     if low in _NONHUMAN_SENDERS or "noreply" in low or "no-reply" in low:
-        return None
-    return addr
+        return False
+    return True
+
+
+def _first_human_email(text: str) -> str | None:
+    """First address in ``text`` that passes ``_is_human_email`` (else None)."""
+    for m in _EMAIL_RE.finditer(text or ""):
+        addr = m.group(0)
+        if _is_human_email(addr):
+            return addr
+    return None
+
+
+def _extract_organizer(from_addr: str, subject: str, body_text: str) -> str | None:
+    """Best human inviter address, searched across the invite in priority order.
+
+    1. The From header's real mailbox — a Calendar invite is From the organizer.
+    2. The From display name — a meet.google.com "Add people" invite arrives From
+       meetings-noreply@google.com but its display name is the inviter's address,
+       e.g. '"bangadu5346@gmail.com (via Google Meet)" <meetings-noreply@google.com>'.
+    3. The subject — 'Happening now: bangadu5346@gmail.com is inviting you...'.
+    4. The body  — 'bangadu5346@gmail.com is inviting you to join a video call'.
+
+    Google's automated senders (meetings-noreply@, calendar-notification@, any
+    *noreply* address) are never returned. Returns None when no human address is
+    present anywhere, leaving the recipient resolver to apply its fallback. The
+    bot's own address is excluded later, by the resolver (which knows it).
+    """
+    display_name, mailbox = parseaddr(from_addr or "")
+    if _is_human_email(mailbox):
+        return mailbox.strip()
+    return (
+        _first_human_email(display_name)
+        or _first_human_email(subject)
+        or _first_human_email(body_text)
+    )
 
 
 @dataclass(frozen=True)
@@ -108,10 +142,12 @@ def parse(
     # 2. Title: strip known Google prefixes and trailing time suffix from subject.
     title = _extract_title(subject)
 
-    # 3. Organizer: the From header, but ONLY if it is a real human. Google's
-    #    notification senders (meetings-noreply@, calendar-notification@) are not
-    #    deliverable, so we store None and let the recipient resolver fall back.
-    organizer_email = _human_organizer(from_addr)
+    # 3. Organizer: the real human inviter, mined from the From mailbox, the From
+    #    display name, the subject, then the body (in that priority). Google's
+    #    notification senders (meetings-noreply@, calendar-notification@) are never
+    #    used; if no human address appears anywhere we store None and let the
+    #    recipient resolver apply its configured fallback.
+    organizer_email = _extract_organizer(from_addr, subject, body_text)
 
     # 4. Scheduled time: optional, parse only unambiguous ISO timestamps.
     start_time = _extract_start_time(body_text)
