@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -20,6 +20,7 @@ from app.db.models import Meeting, MeetingStatus
 from app.db.session import async_session_factory
 from app.logging_config import get_logger
 from app.services import orchestrator
+from app.services.meeting_dedup import dedupe_claims_by_native
 from app.services.vexa.factory import get_provider
 
 log = get_logger(__name__)
@@ -96,15 +97,35 @@ async def _claim_due(db: AsyncSession) -> list[int]:
         .limit(10)
     )
     rows = (await db.execute(stmt)).scalars().all()
-    claimed: list[int] = []
+    claims: list[tuple[int, str]] = []
     for m in rows:
         m.status = MeetingStatus.JOINING
         m.dispatch_claimed_at = now
-        claimed.append(m.id)
+        claims.append((m.id, m.native_meeting_id))
+
+    # Defence-in-depth: if two rows for the SAME Meet code were claimed in one
+    # tick, dispatch only the lowest id and CANCEL the rest so two bots never
+    # enter one room. uq_meetings_active_native makes two in-flight rows for one
+    # code near-impossible post-index; this also covers the brief pre-index
+    # window and is pure-tested (dedupe_claims_by_native).
+    dispatch_ids, cancel_ids = dedupe_claims_by_native(claims)
+    if cancel_ids:
+        cancel_set = set(cancel_ids)
+        for m in rows:
+            if m.id in cancel_set:
+                m.status = MeetingStatus.CANCELLED
+                m.dispatch_claimed_at = None  # clear the phantom claim
+                m.failure_reason = (
+                    "duplicate in-flight meeting for the same Meet code "
+                    "(deduped at claim)"
+                )
+        log.warning(
+            "scheduler_claim_deduped", cancelled=cancel_ids, dispatched=dispatch_ids
+        )
     await db.commit()
-    if claimed:
-        log.info("scheduler_claimed", meeting_ids=claimed)
-    return claimed
+    if dispatch_ids:
+        log.info("scheduler_claimed", meeting_ids=dispatch_ids)
+    return dispatch_ids
 
 
 async def dispatch_due() -> None:
@@ -160,17 +181,31 @@ async def advance_active() -> None:
 
 
 async def process_pending() -> None:
-    """Finalize ended meetings (status PROCESSING) -> transcript -> insights -> email.
+    """Finalize ended meetings -> transcript -> insights -> email.
 
     The single place that runs the insight pipeline, regardless of HOW the
     meeting ended (provider reported it gone, user hit stop, or end_time passed).
     Idempotent per meeting via orchestrator.finalize_meeting.
+
+    Also retries EMAIL_FAILED meetings whose attempt count is still under
+    settings.email_max_attempts, so a transient SMTP failure no longer strands a
+    meeting with no insight email forever (the send is re-claimed atomically, so
+    a retry never double-sends).
     """
     provider = get_provider()
     async with async_session_factory() as db:
         rows = (
             await db.execute(
-                select(Meeting).where(Meeting.status == MeetingStatus.PROCESSING)
+                select(Meeting).where(
+                    or_(
+                        Meeting.status == MeetingStatus.PROCESSING,
+                        and_(
+                            Meeting.status == MeetingStatus.EMAIL_FAILED,
+                            func.coalesce(Meeting.email_attempts, 0)
+                            < settings.email_max_attempts,
+                        ),
+                    )
+                )
             )
         ).scalars().all()
         pending = [m.id for m in rows]
