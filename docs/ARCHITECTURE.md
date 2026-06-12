@@ -540,10 +540,13 @@ transcript.
   prefer that rare, recoverable single-loss over ever double-emailing attendees. A
   future `recover_stale` sweep (claim set + still `PROCESSING` for >N min ⇒ reset)
   would close it.
-- **`recover_stale` re-dispatch.** If `provider.join` succeeds but the `vexa_bot_id`
-  commit crashes, the row resets to `SCHEDULED` and re-dispatches — a possible
-  second bot in a narrow window. Mitigation (adopt the existing bot via `GET /bots`)
-  is backlogged.
+- **`recover_stale` re-dispatch — mitigated.** If `provider.join` succeeds but the
+  `vexa_bot_id` commit crashes, the row resets to `SCHEDULED` and re-dispatches.
+  This no longer creates a second bot: `CloudVexaProvider.join` does **not** retry
+  the non-idempotent `POST /bots`, uses a 30s create timeout, and on a `409`
+  ("already exists") or a read timeout it **adopts** the live bot via `GET /bots`
+  instead of failing (regression: prod meeting #870, where a retried create got a
+  409 and a live, recording bot was wrongly marked `FAILED_JOIN`).
 - **`FAILED_ANALYSIS` is terminal.** A Gemini failure logs an error and stops (no
   auto-retry). Visible in logs; not yet auto-recovered.
 - **`_finalize_locks` growth.** One `asyncio.Lock` per meeting id is retained for
