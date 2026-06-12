@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Meeting, MeetingStatus
+from app.db.models import ACTIVE_STATUSES, Meeting, MeetingStatus
 from app.logging_config import get_logger
 from app.services.google.calendar import CalendarClient
 from app.services.meet_url import InvalidMeetUrl, parse_native_meeting_id
+from app.services.meeting_dedup import partition_calendar_candidates
 
 log = get_logger(__name__)
 
@@ -65,6 +66,38 @@ async def poll_once(
             }
         )
 
+    if not rows:
+        log.info("poller_no_actionable_events")
+        return 0
+
+    # Cross-source guard (symmetric partner to the Gmail scanner's calendar-side
+    # check): never insert a SECOND in-flight row for a Meet code already tracked
+    # under a different source identity (another calendar event sharing a
+    # recurring link, or a gmail-sourced row whose google_event_id is NULL). The
+    # partial unique index uq_meetings_active_native is the hard backstop; this
+    # filters proactively so the common case never raises and logs cleanly. A row
+    # whose code is in flight under its OWN google_event_id is kept (the upsert
+    # just refreshes it).
+    candidate_natives = {r["native_meeting_id"] for r in rows}
+    inflight_rows = (
+        await db.execute(
+            select(Meeting.native_meeting_id, Meeting.google_event_id).where(
+                Meeting.native_meeting_id.in_(candidate_natives),
+                Meeting.status.in_(ACTIVE_STATUSES),
+            )
+        )
+    ).all()
+    inflight_by_native: dict[str, set[str | None]] = {}
+    for native, gid in inflight_rows:
+        inflight_by_native.setdefault(native, set()).add(gid)
+
+    rows, skipped = partition_calendar_candidates(rows, inflight_by_native)
+    for r in skipped:
+        log.info(
+            "poller_skip_already_inflight",
+            native_meeting_id=r["native_meeting_id"],
+            google_event_id=r["google_event_id"],
+        )
     if not rows:
         log.info("poller_no_actionable_events")
         return 0

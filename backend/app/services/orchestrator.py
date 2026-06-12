@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -293,7 +293,16 @@ async def run_analysis(
 
 
 async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
-    """Email the insights report to the organizer; marks meeting COMPLETED."""
+    """Email the insights report to the organizer; marks meeting COMPLETED.
+
+    Exactly-once: the send is gated by an atomic claim that flips
+    ``meeting_reports.email_sent_at`` from NULL to now() in a single
+    ``UPDATE ... RETURNING``. Only the caller that wins the claim sends, so
+    calling this twice — the manual /send-email route, a webhook racing the
+    scheduler's process_pending pass, or a future second process — never sends
+    two emails. On send failure the claim is released and ``email_attempts`` is
+    bumped so process_pending can retry (bounded by settings.email_max_attempts).
+    """
     report = (
         await db.execute(select(MeetingReport).where(MeetingReport.meeting_id == meeting.id))
     ).scalar_one_or_none()
@@ -307,24 +316,70 @@ async def send_report_email(db: AsyncSession, meeting: Meeting) -> str:
         fallback=settings.report_fallback_email,
     )
     if not recipients:
+        # Bump attempts here too: "no deliverable recipient" is otherwise a
+        # permanent condition, so without this process_pending would re-select
+        # the EMAIL_FAILED row every tick forever (attempts < max). Bounded now.
         meeting.status = MeetingStatus.EMAIL_FAILED
+        meeting.email_attempts = (meeting.email_attempts or 0) + 1
         meeting.failure_reason = "no recipients for insight email"
         await db.commit()
         raise RuntimeError(f"meeting {meeting.id} has no email recipients")
-    to = ", ".join(recipients)  # Gmail delivers to all addresses in the To header
+
+    # Atomic email claim: flip email_sent_at NULL -> now() exactly once.
+    claimed_id = (
+        await db.execute(
+            update(MeetingReport)
+            .where(
+                MeetingReport.meeting_id == meeting.id,
+                MeetingReport.email_sent_at.is_(None),
+            )
+            .values(email_sent_at=_now())
+            .returning(MeetingReport.id)
+        )
+    ).scalar_one_or_none()
+    if claimed_id is None:
+        # email_sent_at is already set, so DON'T re-send (this is what kills the
+        # duplicate email — the user's primary concern). The atomic claim, not the
+        # in-process finalize lock, is the real serializer here: the manual
+        # /send-email route does not hold that lock, so the DB claim is what makes
+        # a concurrent send + finalize converge to one email.
+        #
+        # Caveat (documented in ARCHITECTURE residuals): a non-NULL email_sent_at
+        # normally means the send succeeded (failures reset it below). The one
+        # exception is a hard crash in the ~ms window between committing the claim
+        # and the send call — then the email was lost but looks sent. We prefer
+        # that rare, recoverable single-loss over ever double-emailing attendees.
+        if meeting.status != MeetingStatus.COMPLETED:
+            meeting.status = MeetingStatus.COMPLETED
+        await db.commit()
+        log.info("report_email_already_sent", meeting_id=meeting.id)
+        return ""
+    await db.commit()  # persist the claim so a concurrent caller sees it
 
     subject = email_template.build_subject(meeting)
     html = email_template.build_html(meeting, report)
+    to = ", ".join(recipients)  # Gmail delivers to all addresses in the To header
     try:
         message_id = await send_html_email(to=to, subject=subject, html=html)
     except Exception as exc:
+        # Release the claim and bump the counter so process_pending can retry.
+        await db.execute(
+            update(MeetingReport)
+            .where(MeetingReport.meeting_id == meeting.id)
+            .values(email_sent_at=None)
+        )
         meeting.status = MeetingStatus.EMAIL_FAILED
+        meeting.email_attempts = (meeting.email_attempts or 0) + 1
         meeting.failure_reason = f"email failed: {exc}"
         await db.commit()
-        log.error("report_email_failed", meeting_id=meeting.id, error=str(exc))
+        log.error(
+            "report_email_failed",
+            meeting_id=meeting.id,
+            error=str(exc),
+            attempt=meeting.email_attempts,
+        )
         raise
 
-    report.email_sent_at = _now()
     meeting.status = MeetingStatus.COMPLETED
     await db.commit()
     log.info("report_emailed", meeting_id=meeting.id, to=to, message_id=message_id)
@@ -384,14 +439,25 @@ async def finalize_meeting(
             return
         provider = provider or get_provider()
 
-        await fetch_and_store_transcript(db, meeting, provider=provider)
-        try:
-            await run_analysis(db, meeting)
-        except Exception:
-            meeting.status = MeetingStatus.FAILED_ANALYSIS
-            await db.commit()
-            log.exception("finalize_analysis_error", meeting_id=meeting.id)
-            return
+        # If insights already exist (an EMAIL_FAILED retry), skip the expensive
+        # Vexa transcript fetch + Gemini analysis and go straight to (re)sending
+        # the email. This makes the retry cheap and removes any dependency on
+        # Vexa still holding the transcript by retry time.
+        existing_report = (
+            await db.execute(
+                select(MeetingReport).where(MeetingReport.meeting_id == meeting.id)
+            )
+        ).scalar_one_or_none()
+
+        if existing_report is None:
+            await fetch_and_store_transcript(db, meeting, provider=provider)
+            try:
+                await run_analysis(db, meeting)
+            except Exception:
+                meeting.status = MeetingStatus.FAILED_ANALYSIS
+                await db.commit()
+                log.exception("finalize_analysis_error", meeting_id=meeting.id)
+                return
 
         # send_report_email sets COMPLETED (or EMAIL_FAILED and re-raises).
         await send_report_email(db, meeting)
