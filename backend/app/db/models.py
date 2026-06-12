@@ -16,6 +16,7 @@ from sqlalchemy import (
     Enum as SAEnum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
 )
@@ -68,7 +69,11 @@ class Meeting(Base, TimestampMixin):
     gmail_message_id: Mapped[str | None] = mapped_column(String(256))
 
     platform: Mapped[str] = mapped_column(String(32), default="google_meet", nullable=False)
-    # The "abc-defg-hij" portion of the Meet URL (Vexa's native_meeting_id).
+    # The "abc-defg-hij" portion of the Meet URL (Vexa's native_meeting_id) — the
+    # true business identity of the meeting. At most ONE non-terminal row may exist
+    # per code, enforced by the partial unique index uq_meetings_active_native
+    # (migration e5f6a7b8c9d0, WHERE status IN PENDING/SCHEDULED/JOINING/ACTIVE/
+    # PROCESSING) so two bots can never enter one Meet room.
     native_meeting_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     meet_url: Mapped[str] = mapped_column(String(512), nullable=False)
 
@@ -96,6 +101,12 @@ class Meeting(Base, TimestampMixin):
     bot_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     failure_reason: Mapped[str | None] = mapped_column(Text)
+
+    # Bounded retry counter for the insight email. Incremented on each failed send
+    # so the scheduler retries EMAIL_FAILED meetings up to settings.email_max_attempts
+    # and then stops (prevents an eternal-retry loop on a broken recipient).
+    # Nullable in the DB (server default 0); treated as 0 in code.
+    email_attempts: Mapped[int | None] = mapped_column(Integer, server_default="0", default=0)
 
     transcript: Mapped["Transcript | None"] = relationship(
         back_populates="meeting", cascade="all, delete-orphan", uselist=False

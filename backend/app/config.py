@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # This is an explicit, configured address, so it is honoured even if it equals
     # BOT_GOOGLE_EMAIL (the bot mailing its own inbox is a valid, readable target).
     report_fallback_email: str = Field(default="", alias="REPORT_FALLBACK_EMAIL")
+    # Max insight-email send attempts before a meeting stays terminally
+    # EMAIL_FAILED. The scheduler retries EMAIL_FAILED rows with fewer attempts;
+    # a permanently-broken recipient stops being retried after this many tries.
+    email_max_attempts: int = Field(default=3, alias="EMAIL_MAX_ATTEMPTS")
 
     # --- Database (Neon) ---
     # Pooled URL for the app runtime; direct (non-pooler) URL for migrations.
