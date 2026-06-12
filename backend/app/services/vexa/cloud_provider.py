@@ -26,6 +26,12 @@ log = get_logger(__name__)
 
 # Timeouts on every external boundary (connect, read).
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+# POST /bots can take 10-20s for Vexa to bring a bot up; give the create real
+# headroom so we don't time out (then fail/retry) before Vexa even responds —
+# the root cause of a stranded live bot in prod (meeting #870).
+_JOIN_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+# Vexa statuses that mean the bot is gone — never adopt one of these on a 409.
+_TERMINAL_VEXA_STATUSES = {"completed", "failed", "stopped"}
 
 
 class CloudVexaProvider(BotProvider):
@@ -56,20 +62,104 @@ class CloudVexaProvider(BotProvider):
             platform=platform,
             leave_when_alone_s=settings.vexa_leave_when_alone_seconds,
         )
-        resp = await request_with_retries(
-            "POST", f"{self._base}/bots", headers=self._headers(), json=payload, timeout=_TIMEOUT
+        # POST /bots is a non-idempotent CREATE: do NOT retry it (retries=0). A
+        # retry after a slow-but-successful create makes a duplicate / a 409 and
+        # orphans the live bot. If the create 409s ("already exists") or our read
+        # times out, a bot may already be running for this code -> reconcile via
+        # GET /bots and ADOPT it instead of failing.
+        try:
+            resp = await request_with_retries(
+                "POST",
+                f"{self._base}/bots",
+                headers=self._headers(),
+                json=payload,
+                timeout=_JOIN_TIMEOUT,
+                retries=0,
+            )
+        except httpx.TransportError as exc:
+            adopted = await self._find_existing_bot(native_meeting_id, platform)
+            if adopted is not None:
+                log.info(
+                    "vexa_join_adopted_after_timeout",
+                    native_meeting_id=native_meeting_id,
+                    vexa_bot_id=adopted.vexa_bot_id,
+                    status=adopted.status,
+                )
+                return adopted
+            log.error("vexa_join_timeout", native_meeting_id=native_meeting_id, error=str(exc))
+            raise ProviderError("vexa join timed out and no existing bot found") from exc
+
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            result = BotDispatchResult(
+                vexa_bot_id=str(data.get("id", "")),
+                status=data.get("status", "requested"),
+                raw=data,
+            )
+            log.info("vexa_join_ok", vexa_bot_id=result.vexa_bot_id, status=result.status)
+            return result
+
+        if resp.status_code == 409:
+            adopted = await self._find_existing_bot(native_meeting_id, platform)
+            if adopted is not None:
+                log.info(
+                    "vexa_join_adopted_on_conflict",
+                    native_meeting_id=native_meeting_id,
+                    vexa_bot_id=adopted.vexa_bot_id,
+                    status=adopted.status,
+                )
+                return adopted
+            log.error(
+                "vexa_join_conflict_no_bot",
+                native_meeting_id=native_meeting_id,
+                body=resp.text[:300],
+            )
+            raise ProviderError(
+                "vexa join conflict but no existing bot found",
+                status_code=409,
+                body=resp.text,
+            )
+
+        log.error("vexa_join_failed", status=resp.status_code, body=resp.text[:300])
+        raise ProviderError("vexa join failed", status_code=resp.status_code, body=resp.text)
+
+    async def _find_existing_bot(
+        self, native_meeting_id: str, platform: str
+    ) -> BotDispatchResult | None:
+        """Find a live (non-terminal) Vexa bot for this code so it can be adopted.
+
+        Used when POST /bots reports the bot already exists (409) or the create
+        timed out: the bot may already be running, so GET /bots and pick the most
+        recent non-terminal match rather than stranding it as FAILED_JOIN.
+        """
+        try:
+            resp = await request_with_retries(
+                "GET", f"{self._base}/bots", headers=self._headers(), timeout=_TIMEOUT
+            )
+        except httpx.TransportError as exc:
+            log.warning(
+                "vexa_find_existing_failed",
+                native_meeting_id=native_meeting_id,
+                error=str(exc),
+            )
+            return None
+        if resp.status_code != 200:
+            return None
+        alive = [
+            m
+            for m in resp.json().get("meetings", [])
+            if m.get("native_meeting_id") == native_meeting_id
+            and m.get("platform") == platform
+            and str(m.get("status", "")).lower() not in _TERMINAL_VEXA_STATUSES
+        ]
+        if not alive:
+            return None
+        latest = max(alive, key=lambda x: x.get("id", 0))
+        return BotDispatchResult(
+            vexa_bot_id=str(latest.get("id", "")),
+            status=latest.get("status", "requested"),
+            raw=latest,
         )
-        if resp.status_code not in (200, 201):
-            log.error("vexa_join_failed", status=resp.status_code, body=resp.text[:300])
-            raise ProviderError("vexa join failed", status_code=resp.status_code, body=resp.text)
-        data = resp.json()
-        result = BotDispatchResult(
-            vexa_bot_id=str(data.get("id", "")),
-            status=data.get("status", "requested"),
-            raw=data,
-        )
-        log.info("vexa_join_ok", vexa_bot_id=result.vexa_bot_id, status=result.status)
-        return result
 
     async def get_status(
         self, native_meeting_id: str, *, platform: str = "google_meet"
