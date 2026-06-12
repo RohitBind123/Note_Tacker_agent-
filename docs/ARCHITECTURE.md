@@ -287,6 +287,11 @@ bots + a duplicate insight email. Guards, outermost first:
    rows leave `gmail_message_id` NULL and never collide). Re-scanning never makes a
    second row. The upsert NEVER touches `status`/`vexa_bot_id` — same invariant as LOOP 1.
 
+Beneath all five sits the **DB backstop** `uq_meetings_active_native` (§4c): even
+if every app guard were bypassed, Postgres rejects a second in-flight row for one
+Meet code. The symmetric calendar-side guard (the previously-missing direction)
+and the scheduler claim-dedup live in §4c too.
+
 ### Why `start_time = now` for instant meets
 "Add people" invites carry no scheduled time. Setting `start_time = now` lands the
 row inside the scheduler's dispatch window (`start_time ≤ now + dispatch_lead_seconds`),
@@ -454,6 +459,95 @@ on its next lap; the webhook only buys latency (~10s vs one scheduler lap).
 | `copilot_interactions` | one row per answered `@mention` — question, answer, model, grounding chunk ids, status |
 | `transcript_chunks` | chunked transcript + 768-dim `embedding` (pgvector, HNSW cosine) |
 | `meeting_memory` | one rolling structured memory row per meeting |
+
+---
+
+## 4c. Idempotency & exactly-once guarantees
+
+> Target invariant: **one Meet room → one bot → one transcript → one summary →
+> one email.** A live Google Meet room cannot host two concurrent bot sessions, so
+> the whole guarantee reduces to one question — *can two rows exist for one Meet
+> room?* The detection sources key on their own ids (`google_event_id`,
+> `gmail_message_id`); the **business identity** is the Meet room code
+> (`native_meeting_id`). This is the consolidated map of how that identity is kept
+> single, end to end.
+
+### The hard backstop — one in-flight row per Meet code
+Migration `e5f6a7b8c9d0` adds a **partial unique index**:
+```sql
+CREATE UNIQUE INDEX uq_meetings_active_native
+ON meetings (native_meeting_id)
+WHERE upper(status) IN ('PENDING','SCHEDULED','JOINING','ACTIVE','PROCESSING');
+```
+At most ONE non-terminal row may exist per Meet code — enforced by Postgres,
+independent of any application logic. A second insert for an already-in-flight
+code raises `IntegrityError`. Terminal rows (COMPLETED / FAILED_* / CANCELLED) are
+excluded, so a genuinely new meeting reusing an old code is fine. `upper(status)`
+(IMMUTABLE) makes the predicate casing-proof. Pre-migration audit (2026-06-12,
+read-only): 0 rows violate it; status stored UPPERCASE.
+
+### The graceful layer (so the backstop rarely fires)
+Both detectors and the scheduler proactively avoid the conflict — clean logs, no
+IntegrityError churn — via pure, unit-tested helpers in `services/meeting_dedup.py`:
+
+| Path | Guard | Helper |
+|---|---|---|
+| Gmail scanner | cross-source: skip a code already in a non-terminal row | (existing, §3b) |
+| **Calendar poller** | **symmetric** cross-source: skip a code in flight under a *different* source id — the previously-missing other direction | `partition_calendar_candidates` |
+| Scheduler claim | dedupe rows claimed in one tick by code — dispatch the lowest id, CANCEL the rest | `dedupe_claims_by_native` |
+
+Before this work the cross-source guard was **one-directional** (Gmail checked
+Calendar, not vice-versa), so a Gmail-detected meeting followed by a calendar poll
+could create a second row. The poller guard + the DB index close that hole.
+
+### Exactly-once insight email
+The send is gated by an **atomic claim**, not only the in-process finalize lock:
+```sql
+UPDATE meeting_reports SET email_sent_at = now()
+WHERE meeting_id = :id AND email_sent_at IS NULL
+RETURNING id;            -- 0 rows ⇒ another caller owns the send ⇒ do NOT re-send
+```
+Only the caller that flips `email_sent_at` NULL→now() sends, so the manual
+`/send-email` route, a webhook racing the scheduler, and any future second process
+all converge to **one** email. On failure the claim is released and `email_attempts`
+bumped (retry below). Layered with the existing single-process guards: the
+per-meeting `asyncio.Lock` + COMPLETED no-op serialize the auto path, and the unique
+`transcript.meeting_id` / `meeting_report.meeting_id` constraints make transcript &
+report exactly-once per row.
+
+### Bounded retry (no more silent under-delivery)
+A transient SMTP failure used to strand a meeting in `EMAIL_FAILED` forever
+(`process_pending` re-picked only `PROCESSING`). It now also retries `EMAIL_FAILED`
+rows while `email_attempts < EMAIL_MAX_ATTEMPTS` (default 3), then stops. On retry
+`finalize_meeting` skips the Vexa transcript fetch + Gemini analysis when a report
+already exists — cheap, and free of any dependency on Vexa still holding the
+transcript.
+
+### Where the guarantee holds — and its edges
+- **Per row:** one bot (`FOR UPDATE SKIP LOCKED` claim — even multi-process safe),
+  one transcript, one report, one email. Robust.
+- **Per Meet room:** now guaranteed by `uq_meetings_active_native` + the symmetric
+  app guards.
+- **Single-process assumption:** the finalize lock and the webhook event-dedup ring
+  are in-process — correct because the app runs as **one** uvicorn worker / one
+  Railway replica (verified: no `--workers`, default replica count). The atomic
+  email claim is the cross-process backstop for the email; if you ever scale to N
+  replicas, keep the claim and treat the in-process pieces as optimizations.
+
+### Residual, documented risks (not yet closed)
+- **Email crash-window (rare).** A hard crash in the ~ms between committing the
+  email claim and the send call loses that one email but leaves it looking sent. We
+  prefer that rare, recoverable single-loss over ever double-emailing attendees. A
+  future `recover_stale` sweep (claim set + still `PROCESSING` for >N min ⇒ reset)
+  would close it.
+- **`recover_stale` re-dispatch.** If `provider.join` succeeds but the `vexa_bot_id`
+  commit crashes, the row resets to `SCHEDULED` and re-dispatches — a possible
+  second bot in a narrow window. Mitigation (adopt the existing bot via `GET /bots`)
+  is backlogged.
+- **`FAILED_ANALYSIS` is terminal.** A Gemini failure logs an error and stops (no
+  auto-retry). Visible in logs; not yet auto-recovered.
+- **`_finalize_locks` growth.** One `asyncio.Lock` per meeting id is retained for
+  process lifetime (~200 bytes each; cleared on deploy/restart). Negligible.
 
 ---
 
@@ -675,6 +769,9 @@ T0+≤60s LOOP1 poll: GET /events → sees the event (has a Meet link)
   next scheduler tick. If the invite email is stale (room already closed) the bot
   attempts to join and fails fast (`failed_join`) — harmless, but expected when
   first enabling with a wide `newer_than` window.
+- **Idempotency residuals.** The email crash-window, `recover_stale` re-dispatch,
+  terminal `FAILED_ANALYSIS`, and `_finalize_locks` growth are catalogued with
+  their rationale and backlog state in §4c ("Residual, documented risks").
 
 ---
 
